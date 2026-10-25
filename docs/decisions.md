@@ -46,4 +46,4 @@ deployment protection rule terms.
 | 26 Oct 2026 | PodMonitors use `jobLabel: app` (W5) | Generated `up{job="<service>"}` must match under kube-prometheus-stack |
 | 26 Oct 2026 | promtool tests are generated per service and severity (`bg tests`) and checked in CI like the rules | Every window and tier an alert uses has a test; 1.6x/0.4x burns avoid .5 rounding boundaries |
 | 26 Oct 2026 | Spec models forbid unknown keys and reject `le` not in float form and burns needing > 100% errors | Typos and Prometheus 3 `le` normalisation fail loudly at generate time |
-| 26 Oct 2026 | `astral-sh/setup-uv@v10` (reference had v6, last released Sep 2025) | Current major; SHA pins follow in W5 |
+| 26 Oct 2026 | `astral-sh/setup-uv@v10.3.0` (reference had v6, last released Sep 2025) | Exact tag: setup-uv publishes no moving `v10` tag (CI failed to resolve it); newest release older than two weeks; SHA pins follow in W5 |

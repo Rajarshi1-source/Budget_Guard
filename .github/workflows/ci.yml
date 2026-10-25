@@ -39,7 +39,7 @@ jobs:
         working-directory: platform
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0   # exact tag: setup-uv publishes no moving major (v10) tag
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run mypy
