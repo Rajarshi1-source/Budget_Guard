@@ -1,0 +1,39 @@
+# Route tree from budgetguard-slo-rules §5 (Alertmanager v0.34.1: fixes alerts being wrongly
+# un-muted by inhibition, which matters for the page-inhibits-ticket rule below).
+# Secrets are files under /etc/alertmanager/secrets (deploy/compose/secrets, made by `make secrets`).
+route:
+  receiver: slack-tickets
+  group_by: [service, slo, severity]
+  routes:
+    - matchers: [alertname="Watchdog"]      # heartbeat: point at an external dead man's switch in prod
+      receiver: heartbeat
+    - matchers: [severity="page"]
+      receiver: page
+      continue: true                        # without continue the incident table never hears about pages
+    - matchers: [severity="page"]
+      receiver: budgetguard
+    - matchers: [severity="ticket"]
+      receiver: budgetguard
+      continue: true
+    # Explicit, because the root receiver only catches alerts that match NO route: without this a
+    # ticket stops at budgetguard and no human ever sees it (found with `amtool config routes test`).
+    - matchers: [severity="ticket"]
+      receiver: slack-tickets
+receivers:
+  - name: heartbeat
+  - name: page
+    slack_configs:
+      - {api_url_file: /etc/alertmanager/secrets/slack_page_url, channel: "#bg-page", send_resolved: true}
+  - name: slack-tickets
+    slack_configs:
+      - {api_url_file: /etc/alertmanager/secrets/slack_ticket_url, channel: "#bg-tickets", send_resolved: true}
+  - name: budgetguard
+    webhook_configs:
+      - url: http://platform-api:8000/v1/webhooks/alertmanager      # the platform arrives in W4
+        send_resolved: true
+        http_config:
+          authorization: {credentials_file: /etc/alertmanager/secrets/bg_token}
+inhibit_rules:
+  - source_matchers: [severity="page"]
+    target_matchers: [severity="ticket"]
+    equal: [service, slo]

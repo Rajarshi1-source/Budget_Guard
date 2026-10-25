@@ -1,6 +1,6 @@
-# Compose v1 (plan W1.7, rules mounted in W2.7): the four services under test, Prometheus with the
-# generated SLO rules, and the blackbox exporter.
-# Later weeks add Alertmanager (W3), TimescaleDB, Valkey, the platform and Grafana (W4) as in
+# Compose (W1.7; rules W2.7; Alertmanager W3.3): the four services under test, Prometheus with the
+# generated SLO rules, Alertmanager and the blackbox exporter. `make secrets` first.
+# W4 adds TimescaleDB, Valkey, the platform and Grafana as in
 # budgetguard-delivery-platform/references/manifests-and-workflows.md §1.
 # Run from the repo root inside WSL `Ubuntu-D`: make up   (image tags come from .env.versions)
 name: budgetguard
@@ -47,6 +47,13 @@ services:
       - ../../rules/generated:/etc/prometheus/rules:ro
       - prom:/prometheus
     ports: ["9090:9090"]
+
+  alertmanager:
+    image: prom/alertmanager:${ALERTMANAGER_TAG:?set in .env.versions}
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./secrets:/etc/alertmanager/secrets:ro
+    ports: ["9093:9093"]
 
   blackbox:
     image: prom/blackbox-exporter:${BLACKBOX_TAG:?set in .env.versions}

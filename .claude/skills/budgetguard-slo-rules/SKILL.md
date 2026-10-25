@@ -454,6 +454,8 @@ route:
     - matchers: [severity="ticket"]
       receiver: budgetguard
       continue: true
+    - matchers: [severity="ticket"]          # explicit: see the note below
+      receiver: slack-tickets
 receivers:
   - name: page
     slack_configs: [{api_url_file: /etc/alertmanager/slack_page_url, channel: "#bg-page", send_resolved: true}]
@@ -470,11 +472,23 @@ inhibit_rules:
     equal: [service, slo]
 ```
 
+**Tickets need an explicit Slack route (bug in the first version of this tree, found in W3 with
+`amtool config routes test`).** The root receiver only catches alerts that match *no* route; a
+ticket matches the `budgetguard` route, `continue: true` finds nothing after it, and no human is
+ever told. Check every class: page → `page,budgetguard`; ticket → `budgetguard,slack-tickets`.
+The repo's tree also routes `alertname="Watchdog"` to a `heartbeat` receiver (dead man's switch).
+
 Why 0.34.1 and not the portfolio's 0.33.1: 0.34.1 fixes alerts being wrongly un-muted by
 inhibition — exactly the page-inhibits-ticket rule above.
 
 The gate reads active pages from Prometheus's own `ALERTS{alertstate="firing",severity="page"}`,
 so an Alertmanager outage never changes a verdict.
+
+Platform alerts (W3) are generated into `budgetguard-platform.rules.yaml`: `PlatformWideBurn`
+(≥ 3 services paging, counted by service), `BudgetGuardBlind` (`bg_prometheus_reachable == 0` for
+1m; the gauge comes from the platform's Prometheus client breaker) and an always-firing
+`Watchdog`. Measured live: a stopped service raises `SLIIntegrityLost` in 167 s (46 s pending +
+`for: 2m`) and it resolves 31 s after restart (`docs/runbooks/dead-service.md`).
 
 ---
 
