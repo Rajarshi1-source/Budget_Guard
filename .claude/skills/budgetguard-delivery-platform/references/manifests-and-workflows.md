@@ -567,6 +567,7 @@ alertmanager:
         - { matchers: ['severity="page"'], receiver: page, continue: true }
         - { matchers: ['severity="page"'], receiver: budgetguard }
         - { matchers: ['severity="ticket"'], receiver: budgetguard, continue: true }
+        - { matchers: ['severity="ticket"'], receiver: slack-tickets }   # root receiver only catches unmatched alerts
     receivers:
       - name: page
         slack_configs: [{ api_url_file: /etc/alertmanager/secrets/budgetguard-am/slack_page_url, channel: "#bg-page", send_resolved: true }]

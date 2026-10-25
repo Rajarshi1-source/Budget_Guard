@@ -33,3 +33,6 @@ reports/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# compose secrets (copied from deploy/compose/secrets.example by make secrets)
+deploy/compose/secrets/

@@ -11,9 +11,9 @@ FAULT     = curl -fsS -H "X-BG-Fault-Token: $${BG_FAULTS_TOKEN:?export BG_FAULTS
 PROM_TAG := $(shell sed -n 's/^PROMETHEUS_TAG=\([^ #]*\).*/\1/p' $(VERSIONS))
 PROMTOOL  = docker run --rm -v "$(CURDIR)/rules:/rules" --entrypoint sh prom/prometheus:$(PROM_TAG) -c
 
-.PHONY: up down ps logs load rules test-rules reload demo-fast-burn demo-dependency-outage demo-dead-service demo-reset cluster-up
+.PHONY: up down ps logs load rules test-rules reload secrets status chaos-dead-service demo-fast-burn demo-dependency-outage demo-dead-service demo-reset cluster-up
 
-up: rules                               ## build images from services/*/target and start the stack
+up: secrets rules                       ## build images from services/*/target and start the stack
 	$(COMPOSE) up -d --build --wait
 
 rules:                                  ## regenerate rules and promtool tests from slo/*.yaml (CI fails on drift)
@@ -25,6 +25,17 @@ test-rules:                             ## promtool from the same image tag as t
 
 reload:                                 ## make Prometheus pick up regenerated rules
 	curl -fsS -X POST localhost:9090/-/reload
+
+secrets:                                ## create deploy/compose/secrets from the examples (never overwrites)
+	@mkdir -p deploy/compose/secrets
+	@for f in slack_page_url slack_ticket_url; do [ -f deploy/compose/secrets/$$f ] || cp deploy/compose/secrets.example/$$f deploy/compose/secrets/$$f; done
+	@[ -f deploy/compose/secrets/bg_token ] || cp deploy/compose/secrets.example/bg_token.example deploy/compose/secrets/bg_token
+
+status:                                 ## live HEALTHY / AT_RISK / UNKNOWN per service and SLO (D-4)
+	cd platform && uv run bg status ../slo --prometheus http://localhost:9090
+
+chaos-dead-service:                     ## W3.6: stop orders; integrity must go STALE/NO_DATA -> UNKNOWN, SLIIntegrityLost pages
+	$(COMPOSE) stop orders-service
 
 down:
 	$(COMPOSE) down

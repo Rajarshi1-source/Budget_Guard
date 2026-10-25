@@ -152,3 +152,13 @@ def test_spec_files_load_individually(tmp_path: Path) -> None:
 
 def test_sync_slos_is_not_available_yet() -> None:
     assert main(["sync-slos"]) == 2
+
+
+def test_platform_alerts_are_generated_with_the_rev2_threshold() -> None:
+    doc = yaml.safe_load(generate.render_platform())
+    alerts = {r["alert"]: r for r in doc["groups"][0]["rules"]}
+    assert set(alerts) == {"PlatformWideBurn", "BudgetGuardBlind", "Watchdog"}
+    assert alerts["PlatformWideBurn"]["expr"].endswith(">= 3")
+    assert "count by (service)" in alerts["PlatformWideBurn"]["expr"]        # services, not alerts
+    assert alerts["BudgetGuardBlind"]["for"] == "1m"
+    assert (REPO / "rules" / "generated" / "budgetguard-platform.rules.yaml").exists()

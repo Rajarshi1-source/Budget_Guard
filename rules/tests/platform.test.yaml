@@ -1,0 +1,66 @@
+# Platform alerts (Rev 2 §8): several services burning at once, BudgetGuard blind, heartbeat.
+rule_files:
+  - ../generated/budgetguard-platform.rules.yaml
+evaluation_interval: 30s
+tests:
+  - name: three services paging at once is a platform incident
+    interval: 1m
+    input_series:
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="firing",service="auth-service",slo="availability"}'
+        values: '1x10'
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="firing",service="orders-service",slo="availability"}'
+        values: '1x10'
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="firing",service="orders-service",slo="latency"}'
+        values: '1x10'
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="firing",service="inventory-service",slo="latency"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PlatformWideBurn
+        exp_alerts:
+          - exp_labels: {severity: page, service: platform, incident_type: platform_wide_burn}
+            exp_annotations:
+              summary: "3+ services are paging at once: treat as a platform incident; freeze only services whose self-inflicted burn pages"
+
+  - name: two services paging (one with two SLOs) is not platform-wide
+    interval: 1m
+    input_series:
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="firing",service="orders-service",slo="availability"}'
+        values: '1x10'
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="firing",service="orders-service",slo="latency"}'
+        values: '1x10'
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="firing",service="auth-service",slo="availability"}'
+        values: '1x10'
+      - series: 'ALERTS{alertname="ErrorBudgetBurnPage",alertstate="pending",service="inventory-service",slo="availability"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PlatformWideBurn
+        exp_alerts: []
+
+  - name: platform that cannot reach Prometheus pages after a minute
+    interval: 30s
+    input_series:
+      - series: 'bg_prometheus_reachable{instance="platform-api-0"}'
+        values: '1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BudgetGuardBlind
+        exp_alerts:
+          - exp_labels: {severity: page, service: budgetguard, incident_type: budgetguard_blind, instance: platform-api-0}
+            exp_annotations:
+              summary: "BudgetGuard cannot query Prometheus: integrity is STALE, each service's failure_mode decides (fail-open admits as admit_unverified)"
+      - eval_time: 1m
+        alertname: BudgetGuardBlind
+        exp_alerts: []
+
+  - name: heartbeat always fires
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels: {severity: none, service: budgetguard, incident_type: heartbeat}
+            exp_annotations:
+              summary: "Always firing. Route it to an external dead man's switch: if it stops arriving, Prometheus or Alertmanager is down and no rule here can say so"

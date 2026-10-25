@@ -46,4 +46,8 @@ deployment protection rule terms.
 | 26 Oct 2026 | PodMonitors use `jobLabel: app` (W5) | Generated `up{job="<service>"}` must match under kube-prometheus-stack |
 | 26 Oct 2026 | promtool tests are generated per service and severity (`bg tests`) and checked in CI like the rules | Every window and tier an alert uses has a test; 1.6x/0.4x burns avoid .5 rounding boundaries |
 | 26 Oct 2026 | Spec models forbid unknown keys and reject `le` not in float form and burns needing > 100% errors | Typos and Prometheus 3 `le` normalisation fail loudly at generate time |
+| 26 Oct 2026 | Alertmanager routes tickets explicitly to `slack-tickets` after `budgetguard` | The root receiver only catches unmatched alerts, so tickets never reached a human (found with `amtool config routes test`) |
+| 26 Oct 2026 | Platform alerts `PlatformWideBurn` (≥ 3 services paging), `BudgetGuardBlind` (`bg_prometheus_reachable == 0` for 1m), `Watchdog` heartbeat | Rev 2 §8 mitigation table; Watchdog lets an external dead man's switch notice Prometheus/Alertmanager death |
+| 26 Oct 2026 | Platform's Prometheus client: 3 s timeout, breaker opens after 3 failures, 30 s half-open; unreachable → STALE, never healthy | D-4; the breaker state becomes the `bg_prometheus_reachable` gauge in W4 |
+| 26 Oct 2026 | Compose secrets live in git-ignored `deploy/compose/secrets/`, made from `secrets.example/` by `make secrets`; Slack placeholders point at 127.0.0.1:9 | Nothing leaves the machine until real webhook URLs are set |
 | 26 Oct 2026 | `astral-sh/setup-uv@v10.3.0` (reference had v6, last released Sep 2025) | Exact tag: setup-uv publishes no moving `v10` tag (CI failed to resolve it); newest release older than two weeks; SHA pins follow in W5 |
