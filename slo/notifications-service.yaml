@@ -1,0 +1,38 @@
+apiVersion: budgetguard.dev/v1
+kind: ServiceLevel
+metadata:
+  service: notifications-service
+  owner: team-messaging
+spec:
+  window: 30d
+  failure_mode: fail_open          # gate behaviour when SLI integrity is NO_DATA/STALE
+  min_events_per_hour: 600         # traffic floor for short windows
+  job: notifications-service                       # Prometheus scrape job (k3s: PodMonitor jobLabel: app)
+  probe: http://notifications-service:8080/actuator/health/readiness   # blackbox target; alerts match it by the service label
+  slos:
+    - name: availability
+      objective: 0.99            # 99.0%: 1 in 100; 7.2 h over 30 d
+      sli:
+        type: ratio
+        total: http_server_requests_seconds_count{service="notifications-service",uri!~"/actuator.*"}
+        bad: http_server_requests_seconds_count{service="notifications-service",uri!~"/actuator.*",status=~"5.."}
+        self_bad: http_server_requests_seconds_count{service="notifications-service",uri!~"/actuator.*",status=~"5..",error_origin="self"}
+      alerting:
+        page:
+          - {long: 1h, short: 5m, burn: 14.4}     # 2% of budget in 1h
+          - {long: 6h, short: 30m, burn: 6}       # 5% of budget in 6h
+        ticket:
+          - {long: 3d, short: 6h, burn: 1}        # 10% of budget in 3d
+    - name: latency
+      objective: 0.95            # 95% of messages delivered < 2 min after enqueue (end-to-end, not the HTTP 202)
+      sli:
+        type: latency_bucket
+        total: notification_delivery_seconds_count{service="notifications-service"}
+        good: notification_delivery_seconds_bucket{service="notifications-service",le="120.0",outcome="delivered"}
+      alerting:
+        page:   [{long: 1h, short: 5m, burn: 14.4}]
+        ticket: [{long: 3d, short: 6h, burn: 1}]
+  gate:
+    reserve_pct: 5
+    spend_fraction: 0.5
+    hard_stop_on: [page]

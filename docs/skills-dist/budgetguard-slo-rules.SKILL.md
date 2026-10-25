@@ -189,10 +189,17 @@ def _ratio(num: str, den: str, w: str) -> str:
             f"sum by (service) (rate({den}[{w}]))")
 
 
+def _bad_ratio(bad: str, total: str, w: str, fn: str = "rate") -> str:
+    """0, not empty, when there is traffic but no error series (found in W2, see below)."""
+    num = f"sum by (service) ({fn}({bad}[{w}]))"
+    den = f"sum by (service) ({fn}({total}[{w}]))"
+    return f"(\n{num}\nor\n0 * {den}\n)\n/\n{den}"
+
+
 def _error_ratio_expr(slo: Slo, w: str) -> str:
     if slo.sli.type == "ratio":
-        return _ratio(slo.sli.bad, slo.sli.total, w)
-    return f"1 - (\n{_ratio(slo.sli.good, slo.sli.total, w)}\n)"
+        return _bad_ratio(slo.sli.bad, slo.sli.total, w)
+    return f"1 - (\n{_bad_ratio(slo.sli.good, slo.sli.total, w)}\n)"     # zero-fill the good side too
 
 
 def recording_groups(sl: ServiceLevel) -> list[dict]:
@@ -207,7 +214,7 @@ def recording_groups(sl: ServiceLevel) -> list[dict]:
                           "expr": _error_ratio_expr(slo, w)})
             if slo.sli.self_bad:
                 rules.append({"record": f"bg:self_error_ratio:rate{w}", "labels": labels,
-                              "expr": _ratio(slo.sli.self_bad, slo.sli.total, w)})
+                              "expr": _bad_ratio(slo.sli.self_bad, slo.sli.total, w)})
         rules.append({"record": "bg:requests:rate1h", "labels": labels,
                       "expr": f"sum by (service) (rate({slo.sli.total}[1h]))"})
         groups.append({"name": f"bg:{svc}:{slo.name}:ratios", "interval": "30s", "rules": rules})
@@ -247,7 +254,7 @@ def alert_groups(sl: ServiceLevel) -> list[dict]:
     integrity = [f'up{{job="{sl.spec.job}"}} == 0',
                  f'absent(http_server_requests_seconds_count{{service="{svc}"}})']
     if sl.spec.probe:
-        integrity.append(f'probe_success{{instance="{sl.spec.probe}"}} == 0')
+        integrity.append(f'probe_success{{job="blackbox",service="{svc}"}} == 0')   # label, not URL (W2)
     rules.append({"alert": "SLIIntegrityLost", "expr": "\nor ".join(integrity), "for": "2m",
                   "labels": {"severity": "page", "service": svc, "incident_type": "sli_integrity"},
                   "annotations": {"summary": f"{svc}: SLI signal lost; gate reports UNKNOWN"}})
@@ -263,6 +270,20 @@ CLI (`rulegen/cli.py`, exposed as `bg` via `pyproject.toml` scripts):
   committed files (the "nobody hand-edited a rule" guarantee).
 - `bg generate --format prometheus-operator` — wraps groups in a `PrometheusRule` CR with
   `metadata.labels.release: kube-prometheus-stack` so the operator selects it.
+
+**Zero errors must read 0, not empty (bug in the first version of this generator, found in W2 by
+running the rules against live traffic).** A healthy service has no 5xx series at all, so
+`sum(rate(bad)) / sum(rate(total))` is an *empty vector*: "zero errors" looked exactly like "no data",
+which the gate maps to UNKNOWN, and every self-error ratio (D-3) was empty. `sum(rate(bad)) or
+0 * sum(rate(total))` fills the gap only while traffic exists; with no traffic the ratio stays empty,
+so D-4 still holds. The good side of latency SLIs gets the same fill: if every notification fails,
+the `outcome="delivered"` bucket never exists and the SLI must read 1.0, not nothing.
+
+**Probe matched by label, not URL (W2).** The same committed rules run in compose and k3s, where the
+probe URLs differ, so `SLIIntegrityLost` matches `probe_success{job="blackbox",service="<svc>"}`.
+Prometheus derives that label from the target host (relabel in §5). In k3s the PodMonitor needs
+`jobLabel: app` so `up{job="<service>"}` also matches (kube-prometheus-stack otherwise uses
+`<namespace>/<podmonitor>` as the job).
 
 Gaps from Rev 2 that the generator closes:
 
@@ -349,6 +370,20 @@ first run against promtool 3.13.2):
   both the `up == 0` series (carries `job`) and the `absent()` series (does not). Expect both;
   Alertmanager groups them by `service`.
 
+- **Fixtures must look like real services (W2):** with the zero-fill, a request counter without its
+  histogram buckets makes a latency SLI on the same counter read 100% bad, which is the right
+  production behaviour (lost bucket config pages loudly). Availability fixtures therefore also carry
+  an all-fast `le` bucket.
+- **Stay off .5 rounding boundaries (W2):** PromQL `round()` is half-up and Python's is not
+  (0.00075 → 0.0008 vs 0.0007). Generated tests use 1.6x (fires) and 0.4x (quiet) the burn.
+- **Glob inside the container:** `docker run … promtool test rules generated/*.yaml` expands the
+  glob on the host; run `sh -c 'promtool …'` with `--entrypoint sh` instead.
+
+`bg tests ../slo -o ../rules/tests/generated [--check]` writes one file per service and severity
+(every SLO and tier, plus a quiet case) and CI checks them like the rules. Hand-written edge cases
+(`rules/tests/*.test.yaml`) cover the floor, dead target, failing probe, the 2m blip, zero errors =
+0, and no traffic = empty.
+
 When a test fails with "unexpected labels", read the diff, don't loosen the rule.
 
 ---
@@ -398,10 +433,12 @@ scrape_configs:
       - {source_labels: [__address__], target_label: __param_target}
       - {source_labels: [__param_target], target_label: instance}
       - {target_label: __address__, replacement: blackbox:9115}
+      - {source_labels: [__param_target], regex: 'https?://([a-z0-9-]+)[.:/].*', target_label: service}
 ```
 
 Start Prometheus with `--storage.tsdb.retention.time=35d` (B-10: the 15-day default silently
-halves a 30-day window). The spec's `probe` value must equal the blackbox `instance` label.
+halves a 30-day window). The last relabel gives each probe the `service` label the integrity
+alert matches on.
 
 ```yaml
 # deploy/compose/alertmanager.yml

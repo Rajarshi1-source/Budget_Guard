@@ -31,6 +31,37 @@ jobs:
       # The wrapper pins Maven 3.9.16 (plan P-1), so CI and local builds use the same Maven.
       - run: ./mvnw -B -ntp verify
 
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: platform
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v10
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run mypy
+      - run: uv run pytest -q
+      # Generated rules and tests must match the specs: a hand edit or a forgotten regenerate fails here.
+      - run: uv run bg generate ../slo -o ../rules/generated --check
+      - run: uv run bg tests ../slo -o ../rules/tests/generated --check
+
+  rules:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: promtool (same version as the server, from .env.versions)
+        run: |
+          TAG=$(sed -n 's/^PROMETHEUS_TAG=\([^ #]*\).*/\1/p' deploy/compose/.env.versions)
+          echo "promtool $TAG"
+          docker run --rm -v "$PWD/rules:/rules" -w /rules --entrypoint sh "prom/prometheus:$TAG" \
+            -c 'promtool check rules generated/*.yaml'
+          docker run --rm -v "$PWD/rules:/rules" -w /rules/tests --entrypoint sh "prom/prometheus:$TAG" \
+            -c 'promtool test rules *.test.yaml generated/*.test.yaml'
+
   secrets:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
