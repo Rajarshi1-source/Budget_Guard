@@ -1,0 +1,12 @@
+# LF everywhere so scripts, Makefile and YAML work in WSL 2 and containers (plan §6 W0.6).
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files: never touch.
+*.zip binary
+*.skill binary
+*.jar binary
+*.png binary
+*.webp binary
