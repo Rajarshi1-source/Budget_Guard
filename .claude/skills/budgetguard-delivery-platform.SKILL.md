@@ -131,6 +131,12 @@ environment → delete the old token secret → run one deploy.
 chart pin in one PR; CI runs promtool from the *same* image tag as the server, so rule-test
 drift between local and server cannot happen.
 
+**Local cluster on this Windows machine**: Docker Engine runs in the `Ubuntu-D` WSL 2 distro, so
+kind, kubectl and helm run there too (kind v0.33.0, `kindest/node:v1.36.4`, kubectl 1.36.5,
+helm 4.3.1, tested 25 Oct 2026). The distro stops when no session is attached and the kind node
+does not restart by itself; `make cluster-up` runs `docker start` on it. Details: the
+implementation plan, §6 W0.6.
+
 **Investigate a stuck deploy**: Actions run shows "Waiting" → `GET /v1/decisions?run_id=…`
 (was the webhook received?) → gate-worker logs for the delivery id → `XPENDING
 bg:gate-evaluations gate-workers` → the callback state on the decision row.

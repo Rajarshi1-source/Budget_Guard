@@ -29,6 +29,7 @@ there; this file holds the design and the rules.
 | zod | 4.x | `z.iso.datetime()` is the v4 spelling |
 | better-auth | 1.7.x | Auth.js is now maintained by the Better Auth team, which recommends Better Auth for new projects |
 | vitest / @playwright/test | 4.x / 1.5x | |
+| eslint / eslint-config-next | 9.39.x / 16.3.8 | Next 16 removed `next lint`; flat config in `eslint.config.mjs` (`ci.yml` runs `npm run lint`) |
 
 ---
 
@@ -85,7 +86,9 @@ the fresh evaluation admits it on the override lane with a 5% canary
    `providerId`. List the user's accounts, pick `providerId === "github"`, pass its `id`.
    (TypeScript caught this; the docs examples many people copy are older.)
 4. **Hydration-safe time.** The server renders the absolute UTC time; the client adds
-   "in 22h 30m" after mount. Rendering `Date.now()` on both sides produces mismatches.
+   "in 22h 30m" after hydration via `useSyncExternalStore` with a `null` server snapshot.
+   Rendering `Date.now()` on both sides produces mismatches, and `setState` inside
+   `useEffect` fails eslint-config-next 16's `react-hooks/set-state-in-effect` rule.
 5. **UNKNOWN is a sentence, not a colour.** Every state has a shape and a label, and UNKNOWN
    says why ("No metrics at all", "Scrape or probe failing").
 6. **Negative budgets print as negative.** `-12.5%` is information (overspent); clamping

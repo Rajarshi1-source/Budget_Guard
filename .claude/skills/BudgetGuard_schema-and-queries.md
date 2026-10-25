@@ -62,6 +62,7 @@ CREATE TABLE decisions (
     id               BIGSERIAL PRIMARY KEY,
     service_id       SMALLINT NOT NULL REFERENCES services(id),
     github_delivery  TEXT NOT NULL UNIQUE,            -- idempotency key
+    github_deployment_id BIGINT UNIQUE,               -- [added] signed in the body; the delivery header is not (security-and-api.md T-1)
     github_run_id    BIGINT,
     sha              TEXT NOT NULL,
     policy_version   TEXT NOT NULL REFERENCES policy_versions(version),
@@ -83,7 +84,8 @@ CREATE INDEX decisions_run ON decisions (github_run_id);
 CREATE TABLE overrides (
     id                       BIGSERIAL PRIMARY KEY,
     decision_id              BIGINT NOT NULL REFERENCES decisions(id),   -- the BLOCK being overridden
-    approver                 TEXT NOT NULL,          -- GitHub login, or 'github-admin-bypass'
+    approver_id              BIGINT,                 -- [added] numeric GitHub user id (authorization); NULL for reconciler rows
+    approver                 TEXT NOT NULL,          -- GitHub login for display, or 'github-admin-bypass' / 'cluster-admin-drift'
     reason                   TEXT NOT NULL CHECK (length(reason) >= 20),
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at               TIMESTAMPTZ NOT NULL DEFAULT now() + INTERVAL '30 minutes',  -- [added]
@@ -291,12 +293,17 @@ GROUP BY 1, 2 ORDER BY 1;
 
 ```sql
 SELECT s.name,
-       round(100.0 * sum(b.self_bad) / NULLIF(sum(b.bad), 0), 1) AS self_share_pct,
+       round((100.0 * sum(b.self_bad) / NULLIF(sum(b.bad), 0))::numeric, 1) AS self_share_pct,
        sum(b.bad) - sum(b.self_bad) AS dependency_bad_events
 FROM sli_buckets b JOIN slos o ON o.id = b.slo_id JOIN services s ON s.id = o.service_id
 WHERE o.name = 'availability' AND b.bucket_start >= now() - INTERVAL '30 days'
 GROUP BY s.name;
 ```
+
+`bad` and `self_bad` are `DOUBLE PRECISION`, and PostgreSQL has no `round(double precision,
+integer)`, so the cast to `numeric` is required (Rev 2 §5 query 4 has the same bug; found by
+running every query in this file against `timescale/timescaledb:2.27.0-pg18` and `2.31.0-pg18`
+on 25 Oct 2026).
 
 ### 4.7 Pricing inputs — deploy history per service
 
@@ -331,7 +338,7 @@ SET is_change_failure = EXISTS (
           AND (i.culprit_service_id IS NULL OR i.culprit_service_id = d.service_id)
           AND i.started_at BETWEEN d.finished_at AND d.finished_at + INTERVAL '60 minutes'),
     change_failure_budget_pct = (
-        SELECT 100 * (sum(b.self_bad) / NULLIF(sum(b.total), 0)) / (1 - o.objective) / 720
+        SELECT 100 * (sum(b.self_bad) / NULLIF(sum(b.total), 0)) / (1 - max(o.objective)) / 720   -- one availability SLO per service; max() keeps it a valid aggregate
         FROM sli_buckets b JOIN slos o ON o.id = b.slo_id
         WHERE o.service_id = d.service_id AND o.name = 'availability'
           AND b.bucket_start BETWEEN d.finished_at AND d.finished_at + INTERVAL '60 minutes')

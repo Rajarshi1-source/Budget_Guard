@@ -3,7 +3,10 @@
 Two harnesses gate merges in Rev 2 (§10): the **policy backtest** (D-6) and the **Freeze Brief
 grounding eval** (§E). The third, rule correctness, lives in `budgetguard-slo-rules`
 (`promtool test rules`). Every file below ran: 34 pytest tests pass against the gate and
-pricing code from `budgetguard-admission-gate` (Python 3.13 here; target is 3.14).
+pricing code from `budgetguard-admission-gate` (Python 3.13 here; target is 3.14). Re-run on
+25 Oct 2026 on Python 3.14.6: 34 pass after fixing the test's policy path (it read
+`platform/config/freeze-policy.yaml`; the layout and workflows use repo-root `policy/`), the
+template brief scores 120/120, and `backtest.cli score` reports no invariant violations.
 
 ## Contents
 
@@ -1600,7 +1603,7 @@ from backtest.synthetic import BIG_MIGRATION, _facts, population, scenario_cases
 from budgetguard.gate import Lane, Verdict
 from budgetguard.pricing import PricingPolicy
 
-POLICY = Policy.from_yaml(Path(__file__).parent.parent / "config/freeze-policy.yaml", "a" * 40)
+POLICY = Policy.from_yaml(Path(__file__).resolve().parents[2] / "policy/freeze-policy.yaml", "a" * 40)  # repo-root policy/
 
 
 def test_policy_yaml_loads_and_matches_defaults():

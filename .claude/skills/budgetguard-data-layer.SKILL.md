@@ -70,6 +70,13 @@ Rev 2's DDL is kept; four additions close gaps found while writing the gate and 
 | Seed `policy_versions` on boot (`INSERT … ON CONFLICT DO NOTHING` with the current policy SHA) | `decisions.policy_version` is a FK; without a seed row the first decision fails |
 | `incidents.alertname TEXT NOT NULL` and `incidents.slo TEXT` | MTTR "per incident type" needs a stable type; Alertmanager fingerprints alone don't say what fired |
 | `sli_daily` continuous aggregate (hierarchical, on `sli_hourly`) | 13-month reports and the backtester read days, not 112 k buckets |
+| `decisions.github_deployment_id BIGINT UNIQUE` (25 Oct) | The webhook delivery header is not signed, the deployment id is; a replayed body with a new delivery id must not create a second decision (`budgetguard-admission-gate/references/security-and-api.md` T-1) |
+| `overrides.approver_id BIGINT` (25 Oct) | Approvers are authorized by numeric GitHub id; logins can be renamed and re-registered |
+
+Verified 25 Oct 2026: `001`–`003` and every query in the reference ran against
+`timescale/timescaledb:2.27.0-pg18` and `2.31.0-pg18` (Docker in WSL 2). Two query bugs were
+found and fixed there: `round()` on `DOUBLE PRECISION` in the chargeback query (also in Rev 2
+§5 query 4) and an ungrouped `o.objective` in the change-failure cost subquery.
 
 ---
 

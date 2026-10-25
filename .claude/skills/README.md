@@ -9,8 +9,8 @@ references, per-skill test cases and an evaluation report.
 | --- | --- | --- |
 | `budgetguard-slo-math` | Error budget, burn rate, remaining (negative allowed), 2/5/10% ladder, tri-state integrity, exact unfreeze ETA | — |
 | `budgetguard-slo-rules` | ServiceLevel spec, rule generator (`bg generate`), multi-window alerts with traffic floor, SLIIntegrityLost, promtool tests, Sloth parity, Alertmanager | — |
-| `budgetguard-spring-services` | 4 Spring Boot 4.1 / Java 21 services, SLO buckets, `error_origin` (D-3), Resilience4j client, fault endpoint, async SLI, k6 | — |
-| `budgetguard-admission-gate` | GitHub App protection rule, gate chain with rollback and override lanes, pricing, lane proofs, decision records, OIDC, overrides by re-run | `github-app.md` |
+| `budgetguard-spring-services` | 4 Spring Boot 4.1 / Java 21 services, SLO buckets, `error_origin` (D-3), Resilience4j client, fault endpoint, async SLI, k6 | `fault-admin.md` |
+| `budgetguard-admission-gate` | GitHub App protection rule, gate chain with rollback and override lanes, pricing, lane proofs, decision records, OIDC, overrides by re-run, endpoint auth contract, secrets and threat model | `github-app.md`, `security-and-api.md` |
 | `budgetguard-data-layer` | PostgreSQL 18 + TimescaleDB schema, snapshotter, continuous aggregates, Alembic, DORA/MTTR SQL, Valkey keys and streams | `schema-and-queries.md` |
 | `budgetguard-mlops-evals` | Policy backtester, synthetic incident library, Freeze Brief writer (provider-agnostic, template fallback), grounding eval, CI gates | `eval-harness.md` |
 | `budgetguard-delivery-platform` | Compose, multi-arch signed images, k3s, Helm + Argo Rollouts canary with Traefik weights, workflows, tunnel, chaos drill | `manifests-and-workflows.md` |
@@ -20,7 +20,7 @@ references, per-skill test cases and an evaluation report.
 
 - `dist/<skill>.skill` — installable zip (`<skill>/SKILL.md` + `references/`); `dist/<skill>.SKILL.md` — readable copy
 - `dist/BudgetGuard_starter_code.md` — repo layout, platform skeleton (tested), kickoff checklist, build order
-- `dist/BudgetGuard_schema-and-queries.md`, `dist/BudgetGuard_eval-harness.md` — standalone copies of the two references
+- `dist/BudgetGuard_schema-and-queries.md`, `dist/BudgetGuard_eval-harness.md`, `BudgetGuard_security-and-api.md` — standalone copies of three references
 - `BudgetGuard_skill_eval_report.md` — routing accuracy and with/without-skill results
 - `budgetguard-skill-evals.zip` — every skill's `evals/` case folders (skill-creator format), the per-skill trigger sets and the harness scripts
 
@@ -38,3 +38,5 @@ references, per-skill test cases and an evaluation report.
 10. `/v1/decisions` must be public for GitHub-hosted runners; images were signed but never verified.
 11. `incidents` unique on fingerprint merges recurring alerts and corrupts MTTR.
 12. Versions moved: FastAPI 0.128 → pin 0.143.0; Next.js 16.4 shipped (stay on 16.3.8 for now); Better Auth chosen for sign-in.
+13. Security gaps found while writing `security-and-api.md` (25 Oct 2026), all fixed in the admission-gate skill: a forged Alertmanager alert could open the incident-fix lane (lane now also needs a firing `ALERTS` series); a job written to Valkey could steer an installation token to any URL (worker re-validates the callback URL, repo and run id); the webhook delivery header is not signed (second dedupe on `deployment.id`); approvers were matched by renamable login (now numeric id); GitHub never redelivers failed webhooks on its own (redelivery reconciler); an admin could remove the protection rule silently (environment drift reconciler). Full list: `security-and-api.md` §11.
+14. Verification re-run on 25 Oct 2026 (details: `BudgetGuard_Rev2_Detailed_Implementation_Plan.md` §1.6). Reproduced: math 12, eval harness 34, starter API (now 20), dashboard tsc/Vitest/build, promtool on v3.13.5, routing and functional eval counts. Newly run: migrations and every reference query on TimescaleDB 2.27.0 and 2.31.0, Helm lint/render + kubeconform with CRD schemas, `bg-common` compile against Boot 4.1.2, a kind cluster in WSL 2. Bugs found and fixed: two SQL errors (`round()` on double precision, also in Rev 2 §5 query 4; ungrouped `o.objective`), the eval test's policy path, missing ESLint setup and a `setState`-in-effect lint error in the dashboard, Boot 4's moved `MeterRegistryCustomizer` package, an unwritten `FaultState`, `kubeconform:latest` in `ci.yml`, and the chaos drill's assumption that GitHub redelivers webhooks. Resilience4j "3.x" does not exist; pinned 2.4.0.

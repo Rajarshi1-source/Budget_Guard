@@ -1,6 +1,6 @@
 ---
 name: budgetguard-admission-gate
-description: Build and review BudgetGuard's deploy admission controller in FastAPI on Python 3.14 — the GitHub App used as a custom deployment protection rule (webhook HMAC, idempotent deliveries, installation-token callback that approves or rejects the job), the chain-of-responsibility gate (rollback lane, override lane, SLI integrity, incident-fix lane, active-page hard stop, priced admission), Beta-Binomial deploy pricing with change-risk multipliers, provable lanes, replayable decision records, GitHub OIDC auth, overrides by re-run, charge-origin attribution, Valkey single-flight and verdict cache, fail-open versus fail-closed. Use for ANY work on gate.py, pricing.py, lanes, github_app.py, gate_worker.py, decision records, overrides or freeze logic, including why a deploy was blocked or whether a curl step is enough, even if the user just says freeze or gate. MANDATE - the verdict is deterministic and recorded before GitHub is answered; a rollback is always admitted; the LLM never decides.
+description: Build and review BudgetGuard's deploy admission controller in FastAPI on Python 3.14 — the GitHub App used as a custom deployment protection rule (webhook HMAC, idempotent deliveries, installation-token callback that approves or rejects the job), the chain-of-responsibility gate (rollback lane, override lane, SLI integrity, incident-fix lane, active-page hard stop, priced admission), Beta-Binomial deploy pricing with change-risk multipliers, provable lanes, replayable decision records, GitHub OIDC auth, overrides by re-run, charge-origin attribution, Valkey single-flight and verdict cache, fail-open versus fail-closed. Use for ANY work on gate.py, pricing.py, lanes, github_app.py, gate_worker.py, decision records, overrides, endpoint auth, secrets or freeze logic, including why a deploy was blocked or whether a curl step is enough, even if the user just says freeze or gate. MANDATE - the verdict is deterministic and recorded before GitHub is answered; a rollback is always admitted; the LLM never decides.
 ---
 
 # BudgetGuard — admission gate (Rev 2, D-1 / D-2 / D-8)
@@ -18,6 +18,13 @@ speaks the same protocol), SQLAlchemy 2 async + asyncpg. Lives in
 Pairs with: `budgetguard-slo-math` (budget numbers, integrity), `budgetguard-data-layer`
 (decisions, deployments, Valkey keys), `budgetguard-mlops-evals` (backtest replays this exact
 `evaluate()`; Freeze Brief writer), `budgetguard-delivery-platform` (environments, workflow).
+
+Reference files:
+
+| File | Read it when |
+| --- | --- |
+| `references/github-app.md` | Editing the webhook route, job validation, App JWT, installation tokens or the callback |
+| `references/security-and-api.md` | Adding or changing any endpoint, credential or secret; reviewing an auth PR; answering "what is public / who can call this / what if X leaks". It has the full endpoint contract, the secrets inventory with rotation steps, what the internet can reach, a 12-threat model and the security test list |
 
 ---
 
@@ -289,7 +296,7 @@ who benefits from it, so the lane proofs are:
 | Lane | Proof | Stored as |
 | --- | --- | --- |
 | Rollback | The deploy's **service subtree SHA** (git tree object for `services/<service>`) equals the subtree SHA of an earlier deployment with `status = success` and `is_change_failure = false`. A `git revert` or a re-run of an old commit both produce a matching tree; a "rollback" that sneaks in new code cannot. | `deployments.service_tree_sha` (new column — flag to `budgetguard-data-layer`) |
-| Incident fix | PR body references an **open** BudgetGuard incident (`Fixes BG-INC-<id>`) whose `service_id` is this service, and the PR diff is ≤ 400 lines | `decisions.inputs.lane_evidence` |
+| Incident fix | PR body references an **open** BudgetGuard incident (`Fixes BG-INC-<id>`) whose `service_id` is this service, its `alertname` is **firing for this service in Prometheus `ALERTS`** at decision time (an incident row alone can be forged through the Alertmanager webhook; `security-and-api.md` T-6), and the PR diff is ≤ 400 lines | `decisions.inputs.lane_evidence` |
 | Security (optional) | Author is `dependabot[bot]` or `renovate[bot]` and the PR links a GitHub security advisory | treated as incident-fix (forced canary) |
 | Override | An `overrides` row for this service and SHA with `expires_at > now()` and `consumed_by_decision_id IS NULL`, written by the API after it resolved the approver's GitHub login | `overrides.consumed_by_decision_id` set in the same transaction as the new decision |
 
@@ -311,28 +318,35 @@ async def service_tree_sha(gh: GitHubClient, repo: str, sha: str, service: str) 
 
 ## 5. GitHub App protection rule — `integrations/github_app.py`
 
-App settings: permissions **Deployments: read & write**, **Actions: read & write** (re-run
+App settings: register the App as **private** ("Only on this account"); permissions
+**Deployments: read & write**, **Actions: read & write** (re-run
 after an override), **Contents: read**,
 **Pull requests: read & write** (PR file list; Freeze Brief comments); subscribe to
 **Deployment protection rule**, **Deployment status** (DORA, Flow 5) and **Pull request**. Enable the App on each
 `production-<service>` environment, and untick "allow administrators to bypass" if you want
 the break-glass to be visible as an override rather than silent.
 
-The complete module (webhook route, `verify_signature`, `app_jwt`, `installation_token`,
-`post_review`) is in **`references/github-app.md`**. The rules it follows:
+The complete module (webhook route, `verify_signature`, `validate_job`, `app_jwt`,
+`installation_token`, `post_review`) is in **`references/github-app.md`**. The rules it follows:
 
 | Step | Rule |
 | --- | --- |
-| Verify | HMAC-SHA256 of the **raw body** with `compare_digest`, before any JSON parsing |
+| Size | Body over 2 MiB → 413 before reading further |
+| Verify | HMAC-SHA256 of the **raw body** with `compare_digest`, before any JSON parsing; current and previous secret accepted during a rotation |
+| Scope | `installation.id` and `repository.full_name` must be the configured ones, else `{"ignored": "repository"}` |
 | Filter | Only `deployment_protection_rule` events for environments named `production-<service>`; the service comes from the environment name, never from the workflow |
-| Identify | `run_id` parsed from `deployment_callback_url` (`/actions/runs/<id>/deployment_protection_rule`) |
+| Identify | `run_id` parsed from `deployment_callback_url` (`/actions/runs/<id>/deployment_protection_rule`); `deployment.id` carried as the worker's second dedupe key (the delivery header is not signed) |
 | Enqueue | `enqueue_once(valkey, "bg:gate-evaluations", key=X-GitHub-Delivery, job)`: redeliveries are no-ops |
 | Answer | 200 within about a second; the worker decides and calls back |
-| Callback | App JWT (RS256, `iat` 60 s in the past, 9-minute expiry) → installation token → `POST callback_url` with `environment_name`, `state` approved or rejected, `comment` ≤ 1000 chars |
+| Callback | `validate_job` again → App JWT (RS256, `iat` 60 s in the past, 9-minute expiry) → installation token **down-scoped** to this repo and `deployments: write` → `POST callback_url` with `environment_name`, `state` approved or rejected, `comment` ≤ 1000 chars |
 
 ### The worker — `workers/gate_worker.py` (outline the order, it is the contract)
 
 1. `XREADGROUP bg:gate-evaluations gate-workers` → job; `XAUTOCLAIM` anything idle > 60 s.
+   `validate_job(job)` first: repo, installation, environment/service and the exact
+   callback URL for this run. A rejected job is dead-lettered and **no token is minted**, so
+   whoever can write to Valkey cannot steer an installation token to their own URL. Skip the
+   job (record nothing, post nothing) if a decision already exists for its `deployment_id`.
 2. `SET bg:lock:eval:{service} NX PX 15000`; if held, re-queue with 2 s delay.
 3. Cache check `bg:verdict:{service}:{gen}:{sha}` (30 s), where `gen` is
    `bg:verdict-gen:{service}`, bumped by every Alertmanager delivery (O(1) invalidation). Hit → reuse the *decision*, still write a
@@ -382,37 +396,41 @@ number because a freeze is a tool for stopping the team that *caused* the burn. 
 
 ## 6. Auth for everything that is not the webhook (fixes B-8)
 
-| Endpoint | Caller | Auth |
-| --- | --- | --- |
-| `POST /v1/github/webhook` | GitHub | HMAC-SHA256 on the raw body |
-| `GET /v1/decisions?service=&run_id=` | deploy job | GitHub OIDC JWT: `iss=https://token.actions.githubusercontent.com`, `aud=budgetguard`, `repository` = configured repo, `environment` = `production-<service>` |
-| `POST /v1/webhooks/alertmanager` | Alertmanager | shared bearer secret over the cluster network; NetworkPolicy restricts the source |
-| `POST /v1/overrides` | human, via dashboard (BFF) | dashboard service bearer **and** `X-GitHub-User-Token` (the user's OAuth token); the API resolves the login itself with `GET https://api.github.com/user` (cached 5 min under a SHA-256 of the token), so a compromised dashboard cannot name an arbitrary approver; login must be in `approvers.platform-lead`; reason ≥ 20 chars |
-| `GET /v1/services/summary`, `/v1/decisions/page`, `/v1/decisions/{id}`, `POST /v1/decisions/{id}/replay`, `GET /v1/policy/versions` | dashboard (BFF) | dashboard service bearer; read-only except replay, which recomputes and writes nothing |
+Summary only. Request and response shapes, status codes, the public-path list, secrets
+rotation and the threat model are in **`references/security-and-api.md`**; change that file
+in the same PR as any endpoint or credential change.
 
-```python
-# auth.py — GitHub Actions OIDC
-from jwt import PyJWKClient, decode
+| Endpoint | Caller | Auth | Public? |
+| --- | --- | --- | --- |
+| `POST /v1/github/webhook` | GitHub | HMAC-SHA256 on the raw body (dual secret while rotating); repo + installation check | yes (tunnel) |
+| `GET /v1/decisions?service=&run_id=` | deploy job | GitHub OIDC JWT: `iss`, `aud=budgetguard`, `repository` + `repository_id` + `repository_owner_id`, `environment` = `production-<service>`, `run_id` = the query's run, `ref` = main, `workflow_ref` = `deploy.yml@main` | yes (tunnel) |
+| `POST /v1/webhooks/alertmanager` | Alertmanager | shared bearer secret; NetworkPolicy restricts the source | no |
+| `POST /v1/overrides` | human, via dashboard (BFF) | dashboard service bearer **and** `X-GitHub-User-Token` (the user's OAuth token); the API resolves the user itself with `GET https://api.github.com/user` (cached 5 min under a SHA-256 of the token), so a compromised dashboard cannot name an arbitrary approver; the user's **numeric id** must be in `approver_ids` (logins can be renamed and re-registered); reason ≥ 20 chars | no |
+| `GET /v1/services/summary`, `/v1/decisions/page`, `/v1/decisions/{id}`, `POST /v1/decisions/{id}/replay`, `GET /v1/policy/versions` | dashboard (BFF) | dashboard service bearer; read-only except replay, which recomputes and writes nothing | no |
 
-_jwks = PyJWKClient("https://token.actions.githubusercontent.com/.well-known/jwks")
+A public-path guard middleware returns 404 for any other path that arrives through the
+Cloudflare edge (`CF-Connecting-IP` present), so a tunnel misconfiguration cannot expose
+internal routes.
 
-def verify_actions_oidc(token: str, expected_env: str) -> dict:
-    key = _jwks.get_signing_key_from_jwt(token).key
-    claims = decode(token, key, algorithms=["RS256"], audience="budgetguard",
-                    issuer="https://token.actions.githubusercontent.com")
-    if claims["repository"] != settings.github_repo or claims.get("environment") != expected_env:
-        raise PermissionError("token not issued for this repo/environment")
-    return claims
-```
+`verify_actions_oidc(token, expected_env, run_id)` checks exactly the claims in the table
+above with `algorithms=["RS256"]` fixed and 60 s leeway; the tested code is in
+`security-and-api.md` §6.2. The starter code's `auth.py` and its test helper `oidc()` predate
+the extra claims; update both in week 5 (`security-and-api.md` §11 lists every such change).
 
 Overrides never post to the old callback (see the fourth flag): the API writes an
 `overrides` row (approver resolved from their own GitHub token, reason ≥ 20 chars, expires in
 30 minutes, single use), then calls `POST /repos/{repo}/actions/runs/{run_id}/rerun-failed-jobs`
 with the installation token. The re-run raises a fresh protection-rule request; `lanes.py`
 finds the unexpired, unconsumed override for this service and SHA and sets
-`lane = Lane.OVERRIDE`; the decision row marks the override consumed. Break-glass: on
+`lane = Lane.OVERRIDE`; the decision row marks the override consumed. If the re-run call
+fails, the API deletes the override row and returns 503, so no armed override is left behind.
+Break-glass: on
 recovery a reconciler lists GitHub deployments per environment and records any deployment
-without a matching decision as an override with `approver = 'github-admin-bypass'`.
+without a matching decision as an override with `approver = 'github-admin-bypass'`. Three
+more reconcilers run in the same worker (`security-and-api.md` T-1, T-4): failed-webhook
+redelivery (GitHub never redelivers on its own), environment drift (App removed from a
+protection rule, admin bypass re-enabled → page `GateConfigDrift`), and cluster digest drift
+(a Rollout running a digest no decision admitted → recorded as `cluster-admin-drift`).
 
 ### Fourth flag — an override cannot use a callback that was already answered
 
@@ -446,6 +464,9 @@ the backtest as a lane case.
 - Webhook: bad signature 401; redelivery returns `accepted: false`; non-production env ignored.
 - Override lane with `NO_DATA` + `fail_closed` + active page → admit, conservative canary.
 - An override row is single-use: a second re-run of the same SHA is priced normally.
+- Incident-fix lane with an open incident row but no firing `ALERTS` series → priced normally.
+- `validate_job` rejects a foreign callback host, repo, installation or run id, and no token
+  is requested. The full security test list is `security-and-api.md` §9.
 
 ## 9. Interview soundbites
 
@@ -461,3 +482,8 @@ the backtest as a lane case.
   outage freezes auth, not orders. The backtester has a scenario that fails if that regresses."
 - "An override can't approve a job GitHub already failed, so it's a single-use, 30-minute
   record plus a re-run; the re-run is admitted on an override lane and is itself a decision row."
+- "Only two API paths are on the internet, and each one proves its caller: GitHub signs the
+  webhook, and the deploy job brings an OIDC token bound to its repo, environment and run.
+  Everything else answers 404 at the edge and again inside the app."
+- "Nothing from the queue is trusted with a credential: the worker re-checks that the
+  callback URL is GitHub's URL for this repo and this run before it mints a token."

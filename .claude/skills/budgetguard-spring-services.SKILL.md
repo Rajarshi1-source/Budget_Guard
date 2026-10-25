@@ -11,7 +11,8 @@ the demo. They contain no BudgetGuard logic.
 
 Pins (Rev 2 §C): Java **21** LTS (Ricky's machine has Oracle JDK 21.0.11 and Maven 3.9.x on
 Windows 11), Spring Boot **4.1.x** (4.1.1 or newer; never 4.0.6, which carries CVEs; 4.0.7 only
-as a fallback), Maven **3.9.x**, Resilience4j **3.x**, Micrometer Prometheus registry,
+as a fallback), Maven **3.9.x**, Resilience4j **2.4.0** (Rev 2 says 3.x, but no 3.x line exists:
+Maven Central's newest is 2.4.0, checked 25 Oct 2026), Micrometer Prometheus registry,
 k6 **2.2.x**.
 
 Pairs with: `budgetguard-slo-rules` (consumes these metric names and labels),
@@ -51,7 +52,7 @@ orders fail *through*; the label below makes sure auth, not orders, is charged.
 <packaging>pom</packaging>
 <properties>
   <java.version>21</java.version>
-  <resilience4j.version>3.0.0</resilience4j.version>   <!-- confirm the 3.x line on Maven Central -->
+  <resilience4j.version>2.4.0</resilience4j.version>   <!-- newest on Maven Central, 25 Oct 2026; there is no 3.x -->
 </properties>
 <modules>
   <module>bg-common</module>
@@ -67,8 +68,9 @@ Each service depends on: the Spring Boot web MVC starter (Boot 4 split the start
 confirm against the 4.1 reference), `spring-boot-starter-actuator`,
 `micrometer-registry-prometheus`, and `bg-common`. `bg-common` uses the **framework-agnostic**
 Resilience4j modules (`resilience4j-circuitbreaker`, `resilience4j-micrometer`) wired by hand,
-so it does not depend on whichever Spring Boot 4 starter artifact name Resilience4j 3.x ships —
-one less thing to break on an upgrade.
+so it does not depend on a Resilience4j Spring Boot starter (none targets Boot 4 yet) — one less
+thing to break on an upgrade. Verified: every `bg-common` class in this skill plus
+`references/fault-admin.md` compiles against Boot 4.1.2 and Resilience4j 2.4.0 on Java 21.
 
 Build on Windows: `mvnw.cmd -q -DskipTests package` from `services/`; CI uses `./mvnw verify`.
 
@@ -114,7 +116,7 @@ package dev.budgetguard.common.metrics;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.actuate.autoconfigure.metrics.MeterRegistryCustomizer;
+import org.springframework.boot.micrometer.metrics.autoconfigure.MeterRegistryCustomizer;   // Boot 4 moved it (module spring-boot-micrometer-metrics)
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -360,7 +362,9 @@ The contract (the Makefile in `budgetguard-delivery-platform` and the k6 scripts
 | `GET /admin/faults` | — | Current set and seconds until auto-revert |
 
 `FaultState` stores `(Faults, Instant expiresAt)`; `current()` returns the defaults once
-`expiresAt` has passed, so no scheduler thread is needed.
+`expiresAt` has passed, so no scheduler thread is needed. Complete, compiled code for
+`FaultState` and `FaultAdminController` (404 when disabled, `MessageDigest.isEqual` token check,
+bean-validated body with `ttlSeconds` 1–3600) is in **`references/fault-admin.md`**.
 
 ---
 

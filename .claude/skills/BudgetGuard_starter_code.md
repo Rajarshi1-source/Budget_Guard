@@ -5,14 +5,17 @@ skeleton (config, persistence boundary, Valkey helpers, auth, Alertmanager intak
 deploy-job decision read, overrides by re-run, the gate worker loop, migrations, the `bg`
 CLI), the root files, and the build order mapped to the skills.
 
-**Verified on 24 Oct 2026**: the platform's 14 API tests pass (`pytest`), covering webhook
-HMAC and redelivery, Alertmanager auth and idempotent incident upserts, verdict-cache
-invalidation, GitHub OIDC checks on `/v1/decisions` (wrong environment, forked repo,
-blocked run), bake derivation, and the override flow (API-side login resolution, approver
-check, single use, re-run). Worker, PostgreSQL store, callbacks and migrations are
+**Verified on 25 Oct 2026** (Python 3.14.6, FastAPI 0.143.0): the platform's 20 API tests pass
+(`pytest`), covering webhook HMAC and redelivery, Alertmanager auth and idempotent incident
+upserts, verdict-cache invalidation, GitHub OIDC checks on `/v1/decisions` (wrong environment,
+forked repo, another run's token, re-created repo id, foreign workflow, blocked run), bake
+derivation, the override flow (API-side user resolution, approver by numeric id, single use,
+re-run, no armed override after a failed re-run), the dashboard token rotation window and the
+public-path guard. The 24 Oct version had 14 tests; the additions implement
+`budgetguard-admission-gate/references/security-and-api.md` §11. Worker, PostgreSQL store, callbacks and migrations are
 compile-checked only; they need TimescaleDB and GitHub, so cover them with a
 testcontainers integration test in week 4–5. The tests ran on Python 3.13 with FastAPI
-0.162; the target is Python 3.14 with the pin below.
+0.162; the 25 Oct re-run used the target Python 3.14.6 and the 0.143.0 pin.
 
 Where the rest of the code lives (do not duplicate it here):
 
@@ -51,7 +54,7 @@ budgetguard/
 ├── platform/
 │   ├── pyproject.toml
 │   ├── budgetguard/
-│   │   ├── config.py  store.py  pgstore.py  queue.py  auth.py  incidents.py  api.py  main.py
+│   │   ├── config.py  store.py  pgstore.py  queue.py  auth.py  edge.py  incidents.py  api.py  main.py
 │   │   ├── budget.py  integrity.py  eta.py               # budgetguard-slo-math
 │   │   ├── gate.py  pricing.py  lanes.py  changes.py     # budgetguard-admission-gate
 │   │   ├── briefs.py                                     # budgetguard-mlops-evals
@@ -67,7 +70,7 @@ budgetguard/
 ├── grafana/                       # provisioned datasources + dashboards JSON
 ├── load/                          # k6 scripts
 ├── deploy/{compose,helm,k3s}/
-├── .github/{workflows,CODEOWNERS}
+├── .github/{workflows,CODEOWNERS}       # CODEOWNERS also covers workflows/ and deploy/
 └── Makefile
 ```
 
@@ -83,12 +86,16 @@ BG_DATABASE_URL=postgresql+asyncpg://bg:change-me@timescaledb:5432/budgetguard
 BG_VALKEY_URL=redis://valkey:6379/0
 BG_PROMETHEUS_URL=http://prometheus:9090
 BG_GITHUB_REPO=yourname/budgetguard
+BG_GITHUB_REPO_ID=                  # gh api repos/yourname/budgetguard --jq .id
+BG_GITHUB_OWNER_ID=                 # gh api users/yourname --jq .id
+BG_GITHUB_INSTALLATION_ID=          # App settings -> Install App -> the number in the URL
 BG_GITHUB_APP_ID=
 BG_GITHUB_APP_PRIVATE_KEY=          # PEM, newlines as \n
 BG_GITHUB_WEBHOOK_SECRET=
+BG_GITHUB_WEBHOOK_SECRET_PREVIOUS=  # only during a rotation (security-and-api.md §6.1)
 BG_ALERTMANAGER_TOKEN=              # same value in deploy/compose/bg_token
 BG_DASHBOARD_TOKEN=
-BG_APPROVERS=["yourgithublogin"]
+BG_APPROVER_IDS=[12345678]          # numeric GitHub user ids: gh api users/<login> --jq .id
 BG_FAULT_TOKEN=                     # services' /admin/faults
 OPENAI_API_KEY=                     # brief writer only; empty = template briefs
 ```
@@ -102,6 +109,8 @@ OPENAI_API_KEY=                     # brief writer only; empty = template briefs
 /platform/budgetguard/pricing.py @yourname
 /slo/                         @yourname
 /rules/generated/             @yourname
+/.github/workflows/           @yourname
+/deploy/                      @yourname
 ```
 
 ### `.gitignore`
@@ -184,16 +193,27 @@ class Settings(BaseSettings):
     prometheus_url: str = "http://prometheus:9090"
 
     github_repo: str = Field(description="owner/name the App guards")
+    github_repo_id: int                              # OIDC repository_id: survives renames, not re-creation
+    github_owner_id: int                             # OIDC repository_owner_id
+    github_installation_id: int                      # the only installation the App acts for
     github_app_id: str
     github_app_private_key: SecretStr
     github_webhook_secret: SecretStr
+    github_webhook_secret_previous: SecretStr | None = None   # set only during a rotation
     alertmanager_token: SecretStr
+    alertmanager_token_next: SecretStr | None = None          # set only during a rotation
     dashboard_token: SecretStr
-    approvers: tuple[str, ...] = ()                  # GitHub logins allowed to override
+    dashboard_token_next: SecretStr | None = None             # set only during a rotation
+    approver_ids: tuple[int, ...] = ()               # numeric GitHub user ids; logins can be renamed
     policy_version: str = "unknown"                  # baked into the image: git log -1 --format=%H -- policy/
 
     prometheus_timeout_s: float = 3.0
     public_url: str = "https://budgetguard.example.dev"
+
+    def webhook_secrets(self) -> list[str]:
+        """Current secret first, then the previous one while a rotation is in progress."""
+        secrets = [self.github_webhook_secret, self.github_webhook_secret_previous]
+        return [s.get_secret_value() for s in secrets if s is not None]
 
 
 @lru_cache
@@ -257,7 +277,8 @@ class Store(Protocol):
     async def decision_for_run(self, service: str, run_id: int) -> DecisionRow | None: ...
     async def decision(self, decision_id: int) -> DecisionRow | None: ...
     async def upsert_incident(self, e: IncidentEvent) -> None: ...
-    async def create_override(self, decision_id: int, approver: str, reason: str) -> int: ...
+    async def create_override(self, decision_id: int, approver_id: int, approver: str, reason: str) -> int: ...
+    async def delete_override(self, override_id: int) -> None: ...
     async def open_override(self, service: str, sha: str) -> int | None: ...   # lane proof (query 4.10a)
     async def ping(self) -> None: ...
 ```
@@ -295,7 +316,8 @@ async def invalidate_verdicts(r: Any, service: str) -> int:
 ### `platform/budgetguard/auth.py`
 
 ```python
-"""Authentication for every caller that is not the GitHub webhook (HMAC lives in github_app.py)."""
+"""Authentication for every caller that is not the GitHub webhook (HMAC lives in github_app.py).
+Contract: budgetguard-admission-gate/references/security-and-api.md §3 and §6."""
 from __future__ import annotations
 
 import hashlib
@@ -305,6 +327,7 @@ from typing import Any, Callable
 import httpx
 from fastapi import Header, HTTPException, Request
 from jwt import PyJWKClient, decode
+from pydantic import SecretStr
 
 from .config import get_settings
 
@@ -318,17 +341,21 @@ def _bearer(authorization: str | None) -> str:
     return authorization.removeprefix("Bearer ")
 
 
-def _same(a: str, b: str) -> bool:
-    return hmac.compare_digest(a.encode(), b.encode())
+def _matches(token: str, *secrets: SecretStr | None) -> bool:
+    """Constant-time compare against the current secret and, during a rotation, the next one."""
+    return any(s is not None and hmac.compare_digest(token.encode(), s.get_secret_value().encode())
+               for s in secrets)
 
 
 def require_dashboard(authorization: str | None = Header(default=None)) -> None:
-    if not _same(_bearer(authorization), get_settings().dashboard_token.get_secret_value()):
+    s = get_settings()
+    if not _matches(_bearer(authorization), s.dashboard_token, s.dashboard_token_next):
         raise HTTPException(401, "bad dashboard token")
 
 
 def require_alertmanager(authorization: str | None = Header(default=None)) -> None:
-    if not _same(_bearer(authorization), get_settings().alertmanager_token.get_secret_value()):
+    s = get_settings()
+    if not _matches(_bearer(authorization), s.alertmanager_token, s.alertmanager_token_next):
         raise HTTPException(401, "bad alertmanager token")
 
 
@@ -336,31 +363,67 @@ def _jwks_key(token: str) -> Any:
     return _jwks.get_signing_key_from_jwt(token).key
 
 
-def verify_actions_oidc(token: str, expected_env: str, key_for: Callable[[str], Any] | None = None) -> dict:
-    """GitHub Actions OIDC: right issuer, audience, repository and environment, or nothing."""
+def verify_actions_oidc(token: str, expected_env: str, run_id: int,
+                        key_for: Callable[[str], Any] | None = None) -> dict:
+    """GitHub Actions OIDC bound to this repo (by name and id), environment, run, branch and workflow."""
+    s = get_settings()
     key = (key_for or _jwks_key)(token)
-    claims = decode(token, key, algorithms=["RS256"], audience="budgetguard", issuer=ACTIONS_ISSUER)
-    if claims.get("repository") != get_settings().github_repo or claims.get("environment") != expected_env:
-        raise PermissionError("token not issued for this repo/environment")
+    claims = decode(token, key, algorithms=["RS256"], audience="budgetguard", issuer=ACTIONS_ISSUER,
+                    leeway=60, options={"require": ["exp", "iat", "repository", "environment", "run_id"]})
+    expected = {
+        "repository": s.github_repo,
+        "repository_id": str(s.github_repo_id),
+        "repository_owner_id": str(s.github_owner_id),
+        "environment": expected_env,
+        "run_id": str(run_id),
+        "ref": "refs/heads/main",
+        "workflow_ref": f"{s.github_repo}/.github/workflows/deploy.yml@refs/heads/main",
+    }
+    if any(str(claims.get(k)) != v for k, v in expected.items()):
+        raise PermissionError("token not issued for this repo/environment/run")
     return claims
 
 
-async def github_login(request: Request, user_token: str) -> str:
-    """Resolve the human behind a dashboard override from their own GitHub token.
+async def github_user(request: Request, user_token: str) -> tuple[int, str]:
+    """Resolve the human behind a dashboard override from their own GitHub token: (numeric id, login).
     Cached 5 minutes under a hash of the token (never the token itself)."""
     r = request.app.state.valkey
     key = "bg:ghuser:" + hashlib.sha256(user_token.encode()).hexdigest()
     if (cached := await r.get(key)) is not None:
-        return cached if isinstance(cached, str) else cached.decode()
+        uid, _, login = (cached if isinstance(cached, str) else cached.decode()).partition(":")
+        return int(uid), login
     client: httpx.AsyncClient = request.app.state.http
     resp = await client.get("https://api.github.com/user", timeout=5.0,
                             headers={"Authorization": f"Bearer {user_token}", "Accept": "application/vnd.github+json"})
     if resp.status_code == 401:
         raise HTTPException(401, "GitHub token rejected")
     resp.raise_for_status()
-    login = resp.json()["login"]
-    await r.set(key, login, ex=300)
-    return login
+    body = resp.json()
+    uid, login = int(body["id"]), body["login"]
+    await r.set(key, f"{uid}:{login}", ex=300)
+    return uid, login
+```
+
+### `platform/budgetguard/edge.py`
+
+```python
+"""Public-path guard (security-and-api.md §2). The tunnel's path regex is the first filter; this
+repeats it so a tunnel misconfiguration cannot expose internal routes. Cloudflare always sets
+CF-Connecting-IP on requests that came through the edge, and nothing inside the cluster does."""
+from __future__ import annotations
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+PUBLIC = {("POST", "/v1/github/webhook"), ("GET", "/v1/decisions")}
+
+
+def install(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def public_path_guard(request: Request, call_next):
+        if "cf-connecting-ip" in request.headers and (request.method, request.url.path) not in PUBLIC:
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        return await call_next(request)
 ```
 
 ### `platform/budgetguard/incidents.py`
@@ -412,7 +475,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from .auth import github_login, require_alertmanager, require_dashboard, verify_actions_oidc
+from .auth import github_user, require_alertmanager, require_dashboard, verify_actions_oidc
 from .config import get_settings
 from .incidents import events_from_payload
 from .queue import invalidate_verdicts
@@ -452,7 +515,7 @@ async def decision_for_run(service: Annotated[str, Query(pattern=r"^[a-z][a-z0-9
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "OIDC token required")
     try:
-        verify_actions_oidc(authorization.removeprefix("Bearer "), f"production-{service}")
+        verify_actions_oidc(authorization.removeprefix("Bearer "), f"production-{service}", run_id)
     except Exception as exc:                             # bad signature, audience, repo or environment
         raise HTTPException(403, "token not valid for this environment") from exc
     d = await s.decision_for_run(service, run_id)
@@ -487,18 +550,22 @@ async def create_override(body: OverrideIn, request: Request,
                           s: Store = Depends(store)) -> dict:
     if not x_github_user_token:
         raise HTTPException(401, "user token required")
-    login = await github_login(request, x_github_user_token)   # the API decides who this is
-    if login not in get_settings().approvers:
+    user_id, login = await github_user(request, x_github_user_token)   # the API decides who this is
+    if user_id not in get_settings().approver_ids:                      # by id: logins can be renamed
         raise HTTPException(403, f"{login} is not an approver")
     d = await s.decision(body.decision_id)
     if d is None:
         raise HTTPException(404, "no such decision")
     if not d.overridable or d.github_run_id is None or d.installation_id is None:
         raise HTTPException(409, "nothing to override: not blocked, already overridden, or too old")
-    override_id = await s.create_override(d.id, login, body.reason.strip())   # single use, 30 min
+    override_id = await s.create_override(d.id, user_id, login, body.reason.strip())   # single use, 30 min
     # The old callback was spent when the gate rejected; a re-run raises a fresh protection-rule
     # request, which the override lane admits (budgetguard-admission-gate, fourth flag).
-    await request.app.state.rerun(d)
+    try:
+        await request.app.state.rerun(d)
+    except Exception as exc:                             # never leave an armed override behind
+        await s.delete_override(override_id)
+        raise HTTPException(503, "re-run failed; nothing was approved") from exc
     return {"override_id": override_id}
 
 
@@ -530,6 +597,7 @@ import httpx
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
+from . import edge
 from .api import router as api_router
 from .config import get_settings
 from .integrations.github_app import router as github_router
@@ -555,6 +623,7 @@ async def lifespan(app: FastAPI):
 def create_app(*, lifespan_override=None) -> FastAPI:
     app = FastAPI(title="BudgetGuard", version="rev2", lifespan=lifespan_override or lifespan,
                   docs_url=None, redoc_url=None)        # no public docs on the internet-facing app
+    edge.install(app)                                    # public-path guard first
     app.include_router(github_router)
     app.include_router(api_router)
     return app
@@ -564,7 +633,10 @@ app = create_app()
 ```
 
 `budgetguard/integrations/github_app.py` is `budgetguard-admission-gate/references/github-app.md`
-(webhook route, `app_jwt`, `installation_token`, `post_review`), unchanged.
+(webhook route with size cap, dual secret and repo/installation check, `validate_job`, `app_jwt`,
+down-scoped `installation_token`, `post_review`), unchanged. The gate worker below must call
+`validate_job(job)` on every job it reads and skip a job whose `deployment_id` already has a
+decision.
 
 ### `platform/budgetguard/integrations/callbacks.py`
 
@@ -575,13 +647,16 @@ from __future__ import annotations
 import httpx
 
 from ..store import DecisionRow
-from .github_app import installation_token
+from ..config import get_settings
+from .github_app import JobRejected, installation_token
 
 
 async def rerun_failed_jobs(client: httpx.AsyncClient, d: DecisionRow) -> None:
     """Needs the App permission Actions: read & write. GitHub allows re-runs for 30 days."""
     assert d.installation_id is not None and d.github_run_id is not None
-    token = await installation_token(client, d.installation_id)
+    if d.repo != get_settings().github_repo:            # stored inputs are re-checked before any token
+        raise JobRejected("foreign repo")
+    token = await installation_token(client, d.installation_id, {"actions": "write"})
     r = await client.post(f"https://api.github.com/repos/{d.repo}/actions/runs/{d.github_run_id}/rerun-failed-jobs",
                           headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
     r.raise_for_status()
@@ -659,11 +734,17 @@ class PgStore:
             """), {"fp": e.fingerprint, "alertname": e.alertname, "slo": e.slo, "itype": e.incident_type,
                    "sev": e.severity, "started": e.started_at, "resolved": e.resolved_at, "svc": e.service})
 
-    async def create_override(self, decision_id: int, approver: str, reason: str) -> int:
+    async def create_override(self, decision_id: int, approver_id: int, approver: str, reason: str) -> int:
         async with self.engine.begin() as c:
             return (await c.execute(text("""
-                INSERT INTO overrides (decision_id, approver, reason) VALUES (:d, :a, :r) RETURNING id
-            """), {"d": decision_id, "a": approver, "r": reason})).scalar_one()
+                INSERT INTO overrides (decision_id, approver_id, approver, reason)
+                VALUES (:d, :i, :a, :r) RETURNING id
+            """), {"d": decision_id, "i": approver_id, "a": approver, "r": reason})).scalar_one()
+
+    async def delete_override(self, override_id: int) -> None:
+        async with self.engine.begin() as c:
+            await c.execute(text("DELETE FROM overrides WHERE id = :id AND consumed_by_decision_id IS NULL"),
+                            {"id": override_id})
 
     async def open_override(self, service: str, sha: str) -> int | None:
         async with self.engine.connect() as c:
@@ -696,6 +777,7 @@ from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 from ..config import get_settings
+from ..integrations.github_app import JobRejected, validate_job
 
 log = logging.getLogger("gate_worker")
 STREAM, GROUP = "bg:gate-evaluations", "gate-workers"
@@ -767,8 +849,16 @@ async def run() -> None:
                 GROUP, CONSUMER, {STREAM: ">"}, count=10, block=5_000) or []
             for _, messages in batches:
                 for msg_id, fields in messages:
+                    job = json.loads(fields["job"])
                     try:
-                        await handle(r, http, msg_id, json.loads(fields["job"]))
+                        validate_job(job)            # anything in Valkey may not come from GitHub (T-8)
+                    except JobRejected as e:
+                        log.error("job rejected, no token minted: %s", e)
+                        await r.xadd("bg:gate-dead", {"job": fields["job"], "why": str(e)}, maxlen=10_000)
+                        await r.xack(STREAM, GROUP, msg_id)
+                        continue
+                    try:
+                        await handle(r, http, msg_id, job)   # first step inside: skip if deployment_id decided
                     except Exception:                                    # noqa: BLE001
                         log.exception("evaluation failed; left pending for XAUTOCLAIM")
 
@@ -880,12 +970,16 @@ import os
 # Settings are read lazily; set the environment before any budgetguard import.
 os.environ.update({
     "BG_GITHUB_REPO": "ricky/budgetguard",
+    "BG_GITHUB_REPO_ID": "1001",
+    "BG_GITHUB_OWNER_ID": "2002",
+    "BG_GITHUB_INSTALLATION_ID": "99",
     "BG_GITHUB_APP_ID": "123",
     "BG_GITHUB_APP_PRIVATE_KEY": "unused-in-tests",
     "BG_GITHUB_WEBHOOK_SECRET": "whsec",
     "BG_ALERTMANAGER_TOKEN": "amtoken",
     "BG_DASHBOARD_TOKEN": "dashtoken",
-    "BG_APPROVERS": '["alice"]',
+    "BG_DASHBOARD_TOKEN_NEXT": "dashtoken-next",
+    "BG_APPROVER_IDS": "[501]",
 })
 ```
 
@@ -967,10 +1061,14 @@ class FakeStore:
         prev = self.incidents.get(key)
         self.incidents[key] = replace(e, resolved_at=e.resolved_at or (prev.resolved_at if prev else None))
 
-    async def create_override(self, decision_id, approver, reason):
+    async def create_override(self, decision_id, approver_id, approver, reason):
         self.overrides.append((decision_id, approver, reason))
         self.decisions[decision_id] = replace(self.decisions[decision_id], overridable=False)
         return len(self.overrides)
+
+    async def delete_override(self, override_id):
+        decision_id = self.overrides.pop(override_id - 1)[0]
+        self.decisions[decision_id] = replace(self.decisions[decision_id], overridable=True)
 
     async def open_override(self, service, sha):
         return None
@@ -981,8 +1079,10 @@ class FakeStore:
 
 def github_api(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/user":
-        login = {"Bearer tok-alice": "alice", "Bearer tok-bob": "bob"}.get(request.headers["Authorization"])
-        return httpx.Response(200, json={"login": login}) if login else httpx.Response(401)
+        user = {"Bearer tok-alice": (501, "alice"), "Bearer tok-bob": (502, "bob"),
+                "Bearer tok-renamed": (501, "alice-new-name"),                # same person, new login
+                "Bearer tok-squatter": (777, "alice")}.get(request.headers["Authorization"])   # reused login
+        return httpx.Response(200, json={"id": user[0], "login": user[1]}) if user else httpx.Response(401)
     return httpx.Response(404)
 
 
@@ -995,8 +1095,11 @@ def client():
         app.state.valkey = FakeValkey()
         app.state.store = FakeStore()
         app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(github_api))
+        app.state.flags = {}
 
         async def rerun(d):
+            if app.state.flags.get("rerun_fails"):
+                raise httpx.ConnectError("github down")
             reruns.append(d.github_run_id)
         app.state.rerun = rerun
         yield
@@ -1076,10 +1179,13 @@ def test_same_alert_recurring_is_a_new_incident():
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def oidc(environment: str, repo: str = "ricky/budgetguard") -> str:
+def oidc(environment: str, repo: str = "ricky/budgetguard", run_id: int = 778, **claims) -> str:
     now = int(time.time())
     return jwt.encode({"iss": auth.ACTIONS_ISSUER, "aud": "budgetguard", "iat": now, "exp": now + 300,
-                       "repository": repo, "environment": environment}, KEY, algorithm="RS256")
+                       "repository": repo, "repository_id": "1001", "repository_owner_id": "2002",
+                       "environment": environment, "run_id": str(run_id), "ref": "refs/heads/main",
+                       "workflow_ref": f"{repo}/.github/workflows/deploy.yml@refs/heads/main"} | claims,
+                      KEY, algorithm="RS256")
 
 
 @pytest.fixture
@@ -1093,17 +1199,23 @@ def test_decision_read_returns_profile_and_bake(client, jwks):
     assert r.status_code == 200 and r.json()["bake"] == "5m" and r.json()["canary_profile"] == [10, 50, 100]
 
 
-@pytest.mark.parametrize("env, repo", [("production-auth-service", "ricky/budgetguard"),
-                                       ("production-orders-service", "mallory/fork")])
-def test_decision_read_rejects_wrong_environment_or_repo(client, jwks, env, repo):
+@pytest.mark.parametrize("env, repo, claims", [
+    ("production-auth-service", "ricky/budgetguard", {}),
+    ("production-orders-service", "mallory/fork", {}),
+    ("production-orders-service", "ricky/budgetguard", {"run_id": "999"}),        # another run's token
+    ("production-orders-service", "ricky/budgetguard", {"repository_id": "9"}),   # re-created repo
+    ("production-orders-service", "ricky/budgetguard",
+     {"workflow_ref": "ricky/budgetguard/.github/workflows/evil.yml@refs/heads/main"}),
+])
+def test_decision_read_rejects_wrong_scope(client, jwks, env, repo, claims):
     r = client.get("/v1/decisions", params={"service": "orders-service", "run_id": 778},
-                   headers={"Authorization": f"Bearer {oidc(env, repo)}"})
+                   headers={"Authorization": f"Bearer {oidc(env, repo, **claims)}"})
     assert r.status_code == 403
 
 
 def test_blocked_run_never_gets_a_profile(client, jwks):
     r = client.get("/v1/decisions", params={"service": "orders-service", "run_id": 777},
-                   headers={"Authorization": f"Bearer {oidc('production-orders-service')}"})
+                   headers={"Authorization": f"Bearer {oidc('production-orders-service', run_id=777)}"})
     assert r.status_code == 409
 
 
@@ -1124,7 +1236,25 @@ def test_override_records_and_reruns_once(client):
     assert r.status_code == 200 and client.reruns == [777]
     assert client.app.state.store.overrides[0][:2] == (4812, "alice")
     assert override(client, "tok-alice").status_code == 409            # single use
-    assert any(k.startswith("bg:ghuser:") and v == "alice" for k, v in client.app.state.valkey.kv.items())
+    assert any(k.startswith("bg:ghuser:") and v == "501:alice" for k, v in client.app.state.valkey.kv.items())
+
+
+def test_override_authorizes_by_user_id_not_login(client):
+    assert override(client, "tok-squatter").status_code == 403        # someone else registered "alice"
+    assert override(client, "tok-renamed").status_code == 200         # alice renamed her account
+
+
+def test_failed_rerun_leaves_no_armed_override(client):
+    client.app.state.flags["rerun_fails"] = True
+    assert override(client, "tok-alice").status_code == 503
+    store = client.app.state.store
+    assert store.overrides == [] and store.decisions[4812].overridable
+
+
+def test_public_path_guard_hides_internal_routes(client):
+    h = {"Authorization": "Bearer dashtoken", "CF-Connecting-IP": "203.0.113.9"}
+    assert client.get("/v1/decisions/4812", headers=h).status_code == 404
+    assert client.get("/livez", headers=h).status_code == 404
 
 
 def test_override_reason_too_short(client):
@@ -1135,6 +1265,8 @@ def test_dashboard_reads_need_the_service_token(client):
     assert client.get("/v1/decisions/4812").status_code == 401
     r = client.get("/v1/decisions/4812", headers={"Authorization": "Bearer dashtoken"})
     assert r.status_code == 200 and r.json()["overridable"] is True
+    nxt = client.get("/v1/decisions/4812", headers={"Authorization": "Bearer dashtoken-next"})
+    assert nxt.status_code == 200                                     # rotation window
 ```
 
 ---
