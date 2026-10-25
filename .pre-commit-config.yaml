@@ -1,0 +1,7 @@
+# Local secret scan before every commit (plan W0.5). CI runs the same scan on every push.
+# Setup once:  pip install pre-commit  &&  pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks          # scans staged changes; uses .gitleaks.toml

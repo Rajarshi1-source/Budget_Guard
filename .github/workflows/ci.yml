@@ -1,0 +1,44 @@
+name: ci
+
+# Week 0 skeleton (plan W0.5): the Java build and the secret scan. Each week adds its job
+# (python, rules, helm, dashboard) as in budgetguard-delivery-platform/references/manifests-and-workflows.md §8.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  java:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: services
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      # The wrapper pins Maven 3.9.16 (plan P-1), so CI and local builds use the same Maven.
+      - run: ./mvnw -B -ntp verify
+
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0                 # scan the whole history, not only the tip
+      - name: gitleaks (same version and config as the pre-commit hook)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git --redact --no-banner --config .gitleaks.toml --exit-code 1 .

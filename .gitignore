@@ -1,0 +1,33 @@
+# Secrets and credentials (security-and-api.md §7): never committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.kubeconfig
+kubeconfig*
+bg_token
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+
+# Java (services/.gitignore has the full Initializr list)
+target/
+
+# Reports and local output
+reports/
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

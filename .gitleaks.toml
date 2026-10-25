@@ -1,0 +1,11 @@
+# gitleaks config: the default rules, plus narrow allowlists for reviewed false positives.
+# Add an entry only after reading the finding; never allowlist a whole file or directory.
+title = "BudgetGuard"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Prose in security-and-api.md: 'FastAPI, `docs_url=None`' trips generic-api-key"
+regexTarget = "secret"
+regexes = ['''^docs_url=None$''']
