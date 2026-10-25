@@ -34,3 +34,9 @@ scrape_configs:
       # service label from the target host, so SLIIntegrityLost matches probes the same way in compose
       # and k3s (the probe URLs differ; the generated rules do not)
       - {source_labels: [__param_target], regex: 'https?://([a-z0-9-]+)[.:/].*', target_label: service}
+  # BudgetGuard itself (W4): bg_prometheus_reachable feeds BudgetGuardBlind; the snapshotter's
+  # leader gauge and last-bucket timestamp show whether history is still being written.
+  - job_name: platform-api
+    static_configs: [{targets: ["platform-api:8000"]}]
+  - job_name: snapshotter
+    dns_sd_configs: [{names: [snapshotter], type: A, port: 9464}]   # one target per replica

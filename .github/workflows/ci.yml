@@ -1,7 +1,7 @@
 name: ci
 
-# Week 0 skeleton (plan W0.5): the Java build and the secret scan. Each week adds its job
-# (python, rules, helm, dashboard) as in budgetguard-delivery-platform/references/manifests-and-workflows.md §8.
+# Week 0 skeleton (plan W0.5) plus each week's job: java, python, integration (W4), dashboard (W4),
+# rules, secrets; helm follows as in budgetguard-delivery-platform/references/manifests-and-workflows.md §8.
 on:
   pull_request:
   push:
@@ -47,6 +47,49 @@ jobs:
       # Generated rules and tests must match the specs: a hand edit or a forgotten regenerate fails here.
       - run: uv run bg generate ../slo -o ../rules/generated --check
       - run: uv run bg tests ../slo -o ../rules/tests/generated --check
+
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: platform
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: TimescaleDB (TSL image, the tag in .env.versions)
+        run: |
+          TAG=$(sed -n 's/^TIMESCALE_TAG=\([^ #]*\).*/\1/p' ../deploy/compose/.env.versions)
+          docker run -d --name tsdb -p 5432:5432 -e POSTGRES_DB=budgetguard -e POSTGRES_USER=bg \
+            -e POSTGRES_PASSWORD=itest "timescale/timescaledb:$TAG"
+          for i in $(seq 60); do docker exec tsdb pg_isready -U bg -d budgetguard -h 127.0.0.1 && break; sleep 2; done
+      - run: uv sync --frozen
+      - name: migrations, snapshot idempotency, role boundaries
+        env:
+          BG_TEST_DATABASE_URL: postgresql+asyncpg://bg:itest@127.0.0.1:5432/budgetguard
+        run: uv run pytest -q tests/integration
+
+  dashboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+        env:
+          BETTER_AUTH_SECRET: ci-build-only-placeholder-value-not-a-secret
+          NEXT_TELEMETRY_DISABLED: "1"
 
   rules:
     runs-on: ubuntu-24.04

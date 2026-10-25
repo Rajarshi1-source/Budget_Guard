@@ -60,21 +60,15 @@ class PrometheusClient:
     def reachable(self) -> bool:
         return not self.breaker.open
 
-    async def query(self, expr: str, at: datetime | None = None) -> list[dict[str, Any]]:
-        """Instant query; returns the vector result (possibly empty)."""
+    async def _get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         if not self.breaker.allow():
             raise PrometheusUnavailable("circuit open")
-        params: dict[str, str] = {"query": expr}
-        if at is not None:
-            if at.tzinfo is None:
-                raise ValueError("query time must be timezone-aware")
-            params["time"] = f"{at.timestamp():.3f}"
         try:
-            r = await self.http.get(f"{self.base_url}/api/v1/query", params=params, timeout=self.timeout_s)
+            r = await self.http.get(f"{self.base_url}{path}", params=params, timeout=self.timeout_s)
             if r.status_code >= 500:
                 raise PrometheusUnavailable(f"HTTP {r.status_code}")
             r.raise_for_status()
-            body = r.json()
+            body: dict[str, Any] = r.json()
         except (httpx.TransportError, httpx.TimeoutException) as e:
             self.breaker.failure()
             raise PrometheusUnavailable(type(e).__name__) from e
@@ -85,11 +79,37 @@ class PrometheusClient:
         if body.get("status") != "success":
             # a rejected query is our bug, not an outage: do not trip the breaker
             raise ValueError(f"query rejected: {body.get('error', body)}")
-        data = body["data"]
+        data: dict[str, Any] = body["data"]
+        return data
+
+    @staticmethod
+    def _ts(at: datetime) -> str:
+        if at.tzinfo is None:
+            raise ValueError("query time must be timezone-aware")
+        return f"{at.timestamp():.3f}"
+
+    async def query(self, expr: str, at: datetime | None = None) -> list[dict[str, Any]]:
+        """Instant query; returns the vector result (possibly empty)."""
+        params: dict[str, str] = {"query": expr}
+        if at is not None:
+            params["time"] = self._ts(at)
+        data = await self._get("/api/v1/query", params)
         if data["resultType"] == "scalar":
             return [{"metric": {}, "value": data["result"]}]
         result: list[dict[str, Any]] = data["result"]
         return result
+
+    async def range_values(self, expr: str, start: datetime, end: datetime,
+                           step_s: int) -> dict[float, float]:
+        """Range query for an expression with one output series (e.g. a bare sum()):
+        {unix timestamp: value}. Steps with no sample are simply absent; NaN is dropped."""
+        data = await self._get("/api/v1/query_range", {
+            "query": expr, "start": self._ts(start), "end": self._ts(end), "step": f"{step_s}s"})
+        result = data["result"]
+        if len(result) > 1:
+            raise ValueError(f"range_values expects one series, got {len(result)}: {expr}")
+        values = result[0]["values"] if result else []
+        return {float(ts): float(v) for ts, v in values if not math.isnan(float(v))}
 
     async def scalar(self, expr: str, at: datetime | None = None) -> float | None:
         """First sample's value, or None for an empty result. NaN is returned as None too: unknown."""

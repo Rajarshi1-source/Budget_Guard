@@ -1,0 +1,256 @@
+{
+  "uid": "bg-service-reliability",
+  "title": "BudgetGuard / Service reliability",
+  "tags": [
+    "budgetguard",
+    "slo"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(bg:slo_allowed_ratio, service)",
+          "refId": "service"
+        },
+        "definition": "label_values(bg:slo_allowed_ratio, service)",
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Burn rate (availability)",
+      "type": "timeseries",
+      "description": "Error ratio divided by the allowed ratio. 1 = spending exactly on plan; 14.4 spends 2% of the 30-day budget per hour (the page threshold), 6 spends 5% in 6 h.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "5m",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "{{service}} 5m",
+          "expr": "bg:error_ratio:rate5m{service=~\"$service\",slo=\"availability\"} / on (service, slo) bg:slo_allowed_ratio"
+        },
+        {
+          "refId": "1h",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "{{service}} 1h",
+          "expr": "bg:error_ratio:rate1h{service=~\"$service\",slo=\"availability\"} / on (service, slo) bg:slo_allowed_ratio"
+        },
+        {
+          "refId": "6h",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "{{service}} 6h",
+          "expr": "bg:error_ratio:rate6h{service=~\"$service\",slo=\"availability\"} / on (service, slo) bg:slo_allowed_ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "x",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 6
+              },
+              {
+                "color": "red",
+                "value": 14.4
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "30-day good-event ratio per SLO",
+      "type": "table",
+      "description": "From the snapshotter's 5-minute buckets via the sli_hourly continuous aggregate (real-time, so the current hour is included). For availability SLOs good_pct is the availability; for latency SLOs it is the share of requests under the threshold. Remaining budget may be negative.",
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT s.name AS service, o.name AS slo, 100 * o.objective AS objective_pct,\n       100 * (1 - sum(h.bad) / NULLIF(sum(h.total), 0)) AS good_pct,\n       100 * (1 - (sum(h.bad) / NULLIF(sum(h.total), 0)) / (1 - o.objective)) AS budget_remaining_pct,\n       sum(h.total) AS events\nFROM sli_hourly h JOIN slos o ON o.id = h.slo_id JOIN services s ON s.id = o.service_id\nWHERE o.active AND h.hour >= now() - INTERVAL '30 days' AND s.name IN ($service)\nGROUP BY s.name, o.name, o.objective ORDER BY 1, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "events"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "title": "MTTR per incident type (30 days)",
+      "type": "table",
+      "description": "Median and p90, never the mean: one nine-hour incident must not hide ten five-minute ones. Incidents come from Alertmanager's webhook to the platform.",
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT incident_type, count(*) AS incidents,\n       extract(epoch FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY resolved_at - started_at)) / 60 AS p50_min,\n       extract(epoch FROM percentile_cont(0.9) WITHIN GROUP (ORDER BY resolved_at - started_at)) / 60 AS p90_min\nFROM incidents\nWHERE resolved_at IS NOT NULL AND started_at >= now() - INTERVAL '30 days'\nGROUP BY incident_type ORDER BY p50_min DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Deploy frequency and change-failure rate (30 days)",
+      "type": "table",
+      "description": "DORA keys from the deployments table (filled by deployment_status events from W6). Only self-inflicted burn marks a change failure (D-3).",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT s.name AS service,\n       count(d.id) / 30.0 AS deploys_per_day,\n       round(100.0 * count(*) FILTER (WHERE d.is_change_failure)\n             / NULLIF(count(*) FILTER (WHERE d.is_change_failure IS NOT NULL), 0), 1) AS cfr_pct,\n       extract(epoch FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY d.finished_at - d.first_commit_at))\n         / 3600 AS lead_time_p50_h\nFROM services s\nLEFT JOIN deployments d ON d.service_id = s.id\n     AND d.started_at >= now() - INTERVAL '30 days' AND d.status <> 'in_progress'\nWHERE s.name IN ($service)\nGROUP BY s.name ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Minutes of degraded SLI integrity",
+      "type": "timeseries",
+      "description": "Per hour, minutes whose bucket was low_traffic, stale or no_data. A dead service shows up here instead of as a perfect error rate (D-4).",
+      "gridPos": {
+        "x": 12,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT h.hour AS time, s.name || ' ' || o.name AS metric, 5 * h.degraded_buckets AS value\nFROM sli_hourly h JOIN slos o ON o.id = h.slo_id JOIN services s ON s.id = o.service_id\nWHERE $__timeFilter(h.hour) AND o.active AND s.name IN ($service)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

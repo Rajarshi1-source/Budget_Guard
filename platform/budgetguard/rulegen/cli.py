@@ -4,7 +4,7 @@
   bg tests ../slo -o ../rules/tests/generated [--check]
   bg export sloth ../slo/orders-service.yaml > orders.sloth.yaml
   bg status ../slo [--prometheus http://localhost:9090] [--json]   # live tri-state verdicts (D-4)
-  bg sync-slos                      # upsert slos rows; spec_hash detects drift (W4)
+  bg sync-slos ../slo [--database-url URL]   # upsert services/slos rows; spec_hash detects drift
 """
 from __future__ import annotations
 
@@ -35,7 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("slo_dir", type=Path)
     st.add_argument("--prometheus", default="http://localhost:9090")
     st.add_argument("--json", action="store_true")
-    sub.add_parser("sync-slos", help="upsert slos rows from the specs (available from W4)")
+    sy = sub.add_parser("sync-slos", help="upsert services and slos rows from the specs")
+    sy.add_argument("slo_dir", type=Path)
+    sy.add_argument("--database-url", default=None, help="default: BG_DATABASE_URL")
     a = ap.parse_args(argv)
 
     if a.cmd == "generate":
@@ -50,8 +52,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "status":
         return asyncio.run(_status(a.slo_dir, a.prometheus, a.json))
-    print("bg sync-slos needs the database layer (plan W4.3); not available yet", file=sys.stderr)
-    return 2
+    return asyncio.run(_sync(a.slo_dir, a.database_url))
+
+
+async def _sync(slo_dir: Path, url: str | None) -> int:
+    from ..db import make_engine
+    from ..slo_registry import sync_slos
+    from .spec import load_dir
+
+    engine = make_engine(url, pool_size=1)
+    try:
+        async with engine.begin() as conn:
+            result = await sync_slos(conn, load_dir(slo_dir))
+    finally:
+        await engine.dispose()
+    print(f"synced {len(result.ids)} slos ({result.inserted} new, {result.deactivated} deactivated)")
+    return 0
 
 
 async def _status(slo_dir: Path, url: str, as_json: bool) -> int:

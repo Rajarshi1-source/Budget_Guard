@@ -159,6 +159,22 @@ async def run() -> None:
             await asyncio.sleep(60)
 ```
 
+**Built and verified in W4 (26 Oct 2026, `platform/budgetguard/workers/snapshotter.py`).** The
+sketch above has five bugs the real file fixes; use the repo file, not the sketch:
+
+| Sketch | Problem | Built version |
+| --- | --- | --- |
+| `aligned_end(now)` with no delay | at 12:05:01 the 12:00 bucket's last scrape has not landed; the short bucket is never revisited | `aligned_end(now - 45 s)`: three scrape intervals of settle |
+| one instant query per bucket and series | a 30-day backfill is ~200k HTTP calls | one `query_range` per series and window, step 5m (`PrometheusClient.range_values`) |
+| latency: `bad = None` when `good` is absent | every failed notification (no `outcome="delivered"` series) recorded as 0 bad | zero-fill exactly like the rules: no `bad` series = 0, no `good` series = all bad; bad clamped to [0, total] |
+| rewrites any bucket in the window | a bucket older than Prometheus retention would be overwritten with `no_data` | fills only *missing* rows (`generate_series` left join), never rewrites |
+| a Prometheus error propagates | the leader dies, or `no_data` rows get written for an observer outage | `PrometheusUnavailable` skips the tick; the next one backfills |
+
+Also built: `--backfill-hours` and `--once` flags, `bg_snapshotter_leader` and
+`bg_snapshotter_last_bucket_timestamp_seconds` gauges on `--metrics-port`, a `SELECT 1` on the lock
+connection every tick (a dead lock connection ends the leader), and `load_slos` refusing to run when a
+spec's `spec_hash` differs from its `slos` row (`bg sync-slos` runs in the migrate job).
+
 Decisions baked in, worth defending:
 
 - **Advisory lock instead of a Kubernetes Lease.** Rev 2 names a Lease; a PostgreSQL
@@ -207,9 +223,25 @@ When Valkey is down: the webhook handler evaluates inline and relies on
 
 Alembic, one release apart: add nullable column → backfill job → make `NOT NULL` / drop the old
 column in the *next* release. Hypertable DDL (`create_hypertable`, policies, continuous
-aggregates) goes in raw `op.execute()` migrations; continuous aggregate creation cannot run in a
-transaction block, so mark those revisions `transactional = False` (Alembic
-`context.configure(transaction_per_migration=True)` plus `with op.get_context().autocommit_block():`).
+aggregates) goes in raw SQL migrations; continuous aggregate creation cannot run in a
+transaction block (Alembic `context.configure(transaction_per_migration=True)` plus
+`with op.get_context().autocommit_block():`).
+
+How the repo runs the SQL files (W4, verified on 2.31.0-pg18):
+
+- Alembic is **synchronous on psycopg 3** (`env.py` swaps `+asyncpg` for `+psycopg`): asyncpg
+  prepares every statement, so it cannot run a multi-statement file.
+- Files go through `op.get_bind().connection.driver_connection.cursor().execute(sql)` with **no
+  parameters**. SQLAlchemy `text()` treats `:word` as a bind, and `exec_driver_sql` passes an empty
+  tuple, so psycopg parsed `%H` in a comment as a placeholder.
+- `002` is split per statement (also when a line ends `;  -- comment`) and run in an autocommit
+  block: a multi-statement string is one implicit transaction, and cagg creation fails inside it.
+- Role passwords: `SELECT format('ALTER ROLE %I LOGIN PASSWORD %L', CAST(:r AS text), CAST(:p AS text))`
+  then execute the result. The casts avoid `IndeterminateDatatype`; only roles whose
+  `BG_DB_<ROLE>_PASSWORD` is set get LOGIN.
+- Better Auth's tables are migration `006`, run under `SET LOCAL ROLE bg_auth; SET LOCAL search_path
+  = auth` and followed by `RESET ROLE; RESET search_path`, because Alembic records the revision in
+  `public.alembic_version` inside the same transaction.
 
 ## 6. Pitfalls
 
@@ -219,7 +251,9 @@ transaction block, so mark those revisions `transactional = False` (Alembic
 | `TIMESTAMP` without time zone | DST/offset bugs in MTTR (B-14) | `TIMESTAMPTZ` everywhere |
 | MTTR as `avg()` | one 9-hour incident hides ten 5-minute ones | `percentile_cont(0.5)` and `0.9` |
 | `-oss` image | continuous aggregate DDL fails | TSL image |
-| Reading the cagg's last hour as final | real-time aggregation not enabled by default since 2.13 | read the newest hour from `sli_buckets`, or `materialized_only = false` |
+| Reading the cagg's last hour as final | real-time aggregation not enabled by default since 2.13 | the repo sets `materialized_only = false` on both caggs (migration `007`) |
+| Backfilling more than the policy's `start_offset` (3 days) | old buckets sit below the cagg watermark and never reach `sli_hourly`, real-time or not | `CALL refresh_continuous_aggregate(...)` as the **owner** (`bg_app` gets "must be owner"): `make backfill` does it |
+| `:now - INTERVAL '30 days'` with asyncpg | asyncpg infers `:now` as an interval: `operator does not exist: timestamp with time zone >= interval` | compute the bound in Python, or `CAST(:now AS timestamptz)` |
 | Change-failure blames deploys for dependency outages | inflated CFR (B-15) | only self-inflicted burn (`self_bad`) marks a change failure |
 
 ## 7. Interview soundbites
