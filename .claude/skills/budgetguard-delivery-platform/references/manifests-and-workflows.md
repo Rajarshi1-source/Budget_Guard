@@ -440,6 +440,7 @@ metadata:
   name: {{ .Values.service }}
   labels: { release: kube-prometheus-stack }
 spec:
+  jobLabel: app                                   # job="<service>", as the generated up{job=…} rules expect
   selector:
     matchLabels: { app: {{ .Values.service }} }
   podTargetLabels: [rollouts-pod-template-hash]   # becomes rollouts_pod_template_hash

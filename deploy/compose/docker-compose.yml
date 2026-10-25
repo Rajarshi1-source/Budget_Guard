@@ -1,4 +1,5 @@
-# Compose v1 (plan W1.7): the four services under test, Prometheus and the blackbox exporter.
+# Compose v1 (plan W1.7, rules mounted in W2.7): the four services under test, Prometheus with the
+# generated SLO rules, and the blackbox exporter.
 # Later weeks add Alertmanager (W3), TimescaleDB, Valkey, the platform and Grafana (W4) as in
 # budgetguard-delivery-platform/references/manifests-and-workflows.md §1.
 # Run from the repo root inside WSL `Ubuntu-D`: make up   (image tags come from .env.versions)
@@ -43,6 +44,7 @@ services:
       - --web.enable-lifecycle
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../rules/generated:/etc/prometheus/rules:ro
       - prom:/prometheus
     ports: ["9090:9090"]
 

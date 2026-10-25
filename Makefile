@@ -1,6 +1,6 @@
 # Run inside WSL `Ubuntu-D` from the repo root (plan §6 W0.6). Build the jars on Windows first:
 #   cd services && mvnw.cmd -DskipTests package
-# Week 1 targets; rules, test and sloth-parity arrive with the platform (W2+).
+# rules/test-rules need uv in WSL (curl -LsSf https://astral.sh/uv/install.sh | sh); sloth-parity is W8.
 
 VERSIONS := deploy/compose/.env.versions
 COMPOSE  := docker compose --env-file $(VERSIONS) $(if $(wildcard .env),--env-file .env) -f deploy/compose/docker-compose.yml
@@ -8,10 +8,23 @@ K6_TAG   := $(shell sed -n 's/^K6_TAG=\([^ #]*\).*/\1/p' $(VERSIONS))
 K6       := docker run --rm -i --network budgetguard_default -v "$(CURDIR)/load:/load:ro" grafana/k6:$(K6_TAG)
 FAULT     = curl -fsS -H "X-BG-Fault-Token: $${BG_FAULTS_TOKEN:?export BG_FAULTS_TOKEN}" -H 'Content-Type: application/json'
 
-.PHONY: up down ps logs load demo-fast-burn demo-dependency-outage demo-dead-service demo-reset cluster-up
+PROM_TAG := $(shell sed -n 's/^PROMETHEUS_TAG=\([^ #]*\).*/\1/p' $(VERSIONS))
+PROMTOOL  = docker run --rm -v "$(CURDIR)/rules:/rules" --entrypoint sh prom/prometheus:$(PROM_TAG) -c
 
-up:                                     ## build images from services/*/target and start the stack
+.PHONY: up down ps logs load rules test-rules reload demo-fast-burn demo-dependency-outage demo-dead-service demo-reset cluster-up
+
+up: rules                               ## build images from services/*/target and start the stack
 	$(COMPOSE) up -d --build --wait
+
+rules:                                  ## regenerate rules and promtool tests from slo/*.yaml (CI fails on drift)
+	cd platform && uv run bg generate ../slo -o ../rules/generated && uv run bg tests ../slo -o ../rules/tests/generated
+
+test-rules:                             ## promtool from the same image tag as the server; globs expand in the container
+	$(PROMTOOL) 'cd /rules && promtool check rules generated/*.yaml'
+	$(PROMTOOL) 'cd /rules/tests && promtool test rules *.test.yaml generated/*.test.yaml'
+
+reload:                                 ## make Prometheus pick up regenerated rules
+	curl -fsS -X POST localhost:9090/-/reload
 
 down:
 	$(COMPOSE) down

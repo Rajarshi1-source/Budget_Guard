@@ -1,0 +1,38 @@
+apiVersion: budgetguard.dev/v1
+kind: ServiceLevel
+metadata:
+  service: orders-service
+  owner: team-commerce
+spec:
+  window: 30d
+  failure_mode: fail_open          # gate behaviour when SLI integrity is NO_DATA/STALE
+  min_events_per_hour: 600         # traffic floor for short windows
+  job: orders-service                       # Prometheus scrape job (k3s: PodMonitor jobLabel: app)
+  probe: http://orders-service:8080/actuator/health/readiness   # blackbox target; alerts match it by the service label
+  slos:
+    - name: availability
+      objective: 0.999            # 99.9%: 1 in 1,000; 43.2 min over 30 d
+      sli:
+        type: ratio
+        total: http_server_requests_seconds_count{service="orders-service",uri!~"/actuator.*"}
+        bad: http_server_requests_seconds_count{service="orders-service",uri!~"/actuator.*",status=~"5.."}
+        self_bad: http_server_requests_seconds_count{service="orders-service",uri!~"/actuator.*",status=~"5..",error_origin="self"}
+      alerting:
+        page:
+          - {long: 1h, short: 5m, burn: 14.4}     # 2% of budget in 1h
+          - {long: 6h, short: 30m, burn: 6}       # 5% of budget in 6h
+        ticket:
+          - {long: 3d, short: 6h, burn: 1}        # 10% of budget in 3d
+    - name: latency
+      objective: 0.99            # 99% of requests < 500 ms
+      sli:
+        type: latency_bucket
+        total: http_server_requests_seconds_count{service="orders-service",uri!~"/actuator.*"}
+        good: http_server_requests_seconds_bucket{service="orders-service",uri!~"/actuator.*",le="0.5"}
+      alerting:
+        page:   [{long: 1h, short: 5m, burn: 14.4}]
+        ticket: [{long: 3d, short: 6h, burn: 1}]
+  gate:
+    reserve_pct: 5
+    spend_fraction: 0.5
+    hard_stop_on: [page]

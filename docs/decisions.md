@@ -41,3 +41,9 @@ deployment protection rule terms.
 | 26 Oct 2026 | Orders translates expected dependency 4xx (401, 404, 409); an unexpected 4xx is charged to the dependency | Keeps `self` for orders' own faults only (D-3) |
 | 26 Oct 2026 | Notifications delivery timer also carries a `channel` tag (3 values) | Per-channel bulkheads are visible; the SLI sums over it |
 | 26 Oct 2026 | Inventory reservations never use the stale-stock cache | Selling stock we may not have is worse than a 5xx |
+| 26 Oct 2026 | Error-ratio numerators zero-fill while traffic exists (`sum(rate(bad)) or 0 * sum(rate(total))`) | Without it a healthy service's ratio is empty, i.e. "no data"/UNKNOWN; no traffic still stays empty (D-4) |
+| 26 Oct 2026 | `SLIIntegrityLost` matches probes by a `service` label from relabelling, not by URL | The same committed rules run in compose and k3s, where probe URLs differ |
+| 26 Oct 2026 | PodMonitors use `jobLabel: app` (W5) | Generated `up{job="<service>"}` must match under kube-prometheus-stack |
+| 26 Oct 2026 | promtool tests are generated per service and severity (`bg tests`) and checked in CI like the rules | Every window and tier an alert uses has a test; 1.6x/0.4x burns avoid .5 rounding boundaries |
+| 26 Oct 2026 | Spec models forbid unknown keys and reject `le` not in float form and burns needing > 100% errors | Typos and Prometheus 3 `le` normalisation fail loudly at generate time |
+| 26 Oct 2026 | `astral-sh/setup-uv@v10` (reference had v6, last released Sep 2025) | Current major; SHA pins follow in W5 |
