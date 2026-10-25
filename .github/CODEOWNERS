@@ -1,0 +1,11 @@
+# The gate's behaviour changes only with a platform review and a passing backtest.
+# Workflows and deploy manifests are covered too: editing them is how a gate would be bypassed
+# (security-and-api.md T-3). Branch protection on main must require code-owner review.
+/policy/                          @Rajarshi1-source
+/platform/budgetguard/gate.py     @Rajarshi1-source
+/platform/budgetguard/pricing.py  @Rajarshi1-source
+/slo/                             @Rajarshi1-source
+/rules/generated/                 @Rajarshi1-source
+/.github/workflows/               @Rajarshi1-source
+/.github/CODEOWNERS               @Rajarshi1-source
+/deploy/                          @Rajarshi1-source

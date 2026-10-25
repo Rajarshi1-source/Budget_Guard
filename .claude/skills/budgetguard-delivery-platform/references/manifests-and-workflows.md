@@ -194,7 +194,7 @@ sloth-parity:                           ## budgetguard-slo-rules §4: same ratio
 	done
 	$(PROMTOOL) test rules rules/parity/tests/*.yaml
 
-FAULT = curl -fsS -H "X-BG-Fault-Token: $${BG_FAULT_TOKEN:?export BG_FAULT_TOKEN}" -H 'Content-Type: application/json'
+FAULT = curl -fsS -H "X-BG-Fault-Token: $${BG_FAULTS_TOKEN:?export BG_FAULTS_TOKEN}" -H 'Content-Type: application/json'
 
 demo-fast-burn:                         ## orders 20x self-inflicted for 15 min (99.9% SLO, 2% errors)
 	$(FAULT) -X POST localhost:8082/admin/faults -d '{"errorRate":0.02,"ttlSeconds":900}'

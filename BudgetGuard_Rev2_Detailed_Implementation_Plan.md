@@ -544,6 +544,11 @@ kind get kubeconfig --name bg > /mnt/c/Users/RAJARSHI/.kube/kind-bg.yaml   # opt
   (today's checks used them) but builds over that bridge are slower. If compose image builds
   feel slow, keep a second clone inside the distro (`~/src/budgetguard`, which is also on D:,
   inside the distro's disk image).
+- Measured during W0.5: `./mvnw verify` in a Linux container over the `/mnt/d` bind mount
+  passed, but every forked Surefire JVM hung 30 s after `System.exit(0)` before being killed.
+  On the container's own filesystem the same build took 35 s with no hang. So run Maven on
+  Windows (as planned) or from a clone inside the distro, never over `/mnt/*`. CI runners are
+  unaffected.
 - A script with CRLF endings failed under bash today. Add a root `.gitattributes` before the
   first code commit:
 

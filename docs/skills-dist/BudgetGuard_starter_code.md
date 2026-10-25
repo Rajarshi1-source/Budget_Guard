@@ -96,7 +96,7 @@ BG_GITHUB_WEBHOOK_SECRET_PREVIOUS=  # only during a rotation (security-and-api.m
 BG_ALERTMANAGER_TOKEN=              # same value in deploy/compose/bg_token
 BG_DASHBOARD_TOKEN=
 BG_APPROVER_IDS=[12345678]          # numeric GitHub user ids: gh api users/<login> --jq .id
-BG_FAULT_TOKEN=                     # services' /admin/faults
+BG_FAULTS_TOKEN=                    # services' /admin/faults (X-BG-Fault-Token)
 OPENAI_API_KEY=                     # brief writer only; empty = template briefs
 ```
 
