@@ -1,0 +1,30 @@
+# budgetguard-slo-rules §5. Generated rules (rule_files) and Alertmanager are added in W2–W3.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+scrape_configs:
+  - job_name: auth-service
+    metrics_path: /actuator/prometheus
+    static_configs: [{targets: ["auth-service:8080"]}]
+  - job_name: orders-service
+    metrics_path: /actuator/prometheus
+    static_configs: [{targets: ["orders-service:8080"]}]
+  - job_name: inventory-service
+    metrics_path: /actuator/prometheus
+    static_configs: [{targets: ["inventory-service:8080"]}]
+  - job_name: notifications-service
+    metrics_path: /actuator/prometheus
+    static_configs: [{targets: ["notifications-service:8080"]}]
+  - job_name: blackbox
+    metrics_path: /probe
+    params: {module: [http_2xx]}
+    static_configs:
+      - targets:                                   # the SLO spec's `probe` must equal this instance label
+          - http://auth-service:8080/actuator/health/readiness
+          - http://orders-service:8080/actuator/health/readiness
+          - http://inventory-service:8080/actuator/health/readiness
+          - http://notifications-service:8080/actuator/health/readiness
+    relabel_configs:
+      - {source_labels: [__address__], target_label: __param_target}
+      - {source_labels: [__param_target], target_label: instance}
+      - {target_label: __address__, replacement: blackbox:9115}

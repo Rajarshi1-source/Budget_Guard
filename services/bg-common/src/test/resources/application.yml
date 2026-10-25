@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: bg-common-test
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    distribution:
+      slo:
+        http.server.requests: 300ms,500ms,800ms,2s
+budgetguard:
+  faults:
+    admin-enabled: true
+    admin-token: test-fault-token

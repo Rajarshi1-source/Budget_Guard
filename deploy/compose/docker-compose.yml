@@ -1,0 +1,53 @@
+# Compose v1 (plan W1.7): the four services under test, Prometheus and the blackbox exporter.
+# Later weeks add Alertmanager (W3), TimescaleDB, Valkey, the platform and Grafana (W4) as in
+# budgetguard-delivery-platform/references/manifests-and-workflows.md §1.
+# Run from the repo root inside WSL `Ubuntu-D`: make up   (image tags come from .env.versions)
+name: budgetguard
+
+x-svc: &svc
+  restart: unless-stopped
+  environment: &svc-env
+    JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError"
+    BG_FAULTS_ADMIN: "${BG_FAULTS_ADMIN:-false}"     # demo profile only (security-and-api.md T-7)
+    BG_FAULTS_TOKEN: "${BG_FAULTS_TOKEN:-}"
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/readiness"]
+    interval: 10s
+    retries: 12
+    start_period: 20s
+  mem_limit: 512m
+
+services:
+  auth-service:          { <<: *svc, build: ../../services/auth-service, ports: ["8081:8080"] }
+  inventory-service:     { <<: *svc, build: ../../services/inventory-service, ports: ["8083:8080"] }
+  notifications-service: { <<: *svc, build: ../../services/notifications-service, ports: ["8084:8080"] }
+  orders-service:
+    <<: *svc
+    build: ../../services/orders-service
+    ports: ["8082:8080"]
+    environment:
+      <<: *svc-env
+      BG_AUTH_URL: http://auth-service:8080
+      BG_INVENTORY_URL: http://inventory-service:8080
+      BG_NOTIFICATIONS_URL: http://notifications-service:8080
+    depends_on:
+      auth-service: { condition: service_healthy }
+      inventory-service: { condition: service_healthy }
+      notifications-service: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_TAG:?set in .env.versions}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=35d          # a 30-day SLO needs more than the 15d default (B-10)
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom:/prometheus
+    ports: ["9090:9090"]
+
+  blackbox:
+    image: prom/blackbox-exporter:${BLACKBOX_TAG:?set in .env.versions}
+    volumes: ["./blackbox.yml:/etc/blackbox_exporter/config.yml:ro"]
+
+volumes: { prom: {} }

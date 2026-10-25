@@ -2,7 +2,11 @@
 
 The two classes `SKILL.md` §4 describes. Compiled on 25 Oct 2026 together with every other `bg-common` class in the skill against Spring Boot 4.1.2, Resilience4j 2.4.0 and Java 21 (`mvn compile`, 11 classes). Not yet unit-tested: write the §8 tests for them in week 1 (no token → 401; admin profile off → 404; `ttlSeconds` over 3600 → 400; expiry reverts to the env defaults).
 
-Still to write in week 1, not in this skill: `FAULT_DEPENDENCY` handling inside `DownstreamClient` (throw `DownstreamException` before sending when `FaultState.current().dependency()` names the target) and `FAULT_CRASH` (readiness DOWN, then `SpringApplication.exit` after 10 s).
+Implemented in W1 (`services/bg-common`): `FAULT_DEPENDENCY` inside `DownstreamClient` (throws
+`DownstreamException` before sending, so the breaker and the `dep:` label behave as in a real
+partition) and `FAULT_CRASH` in `FaultCrash` (readiness `REFUSING_TRAFFIC` at once, exit after
+`budgetguard.faults.crash-grace`, default 10 s; the controller calls it when `crash` is true).
+`FaultState` there carries `@Autowired` on its public constructor (two constructors).
 
 ## `bg-common/src/main/java/dev/budgetguard/common/faults/FaultState.java`
 
