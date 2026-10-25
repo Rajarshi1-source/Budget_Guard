@@ -150,10 +150,6 @@ def test_spec_files_load_individually(tmp_path: Path) -> None:
     assert load(copy).spec.slos[0].objective == 0.9995
 
 
-def test_sync_slos_is_not_available_yet() -> None:
-    assert main(["sync-slos"]) == 2
-
-
 def test_platform_alerts_are_generated_with_the_rev2_threshold() -> None:
     doc = yaml.safe_load(generate.render_platform())
     alerts = {r["alert"]: r for r in doc["groups"][0]["rules"]}

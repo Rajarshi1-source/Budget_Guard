@@ -1,0 +1,10 @@
+# Allowlist for platform/Dockerfile (build context: repo root). BuildKit reads <Dockerfile>.dockerignore.
+*
+!platform/pyproject.toml
+!platform/uv.lock
+!platform/alembic.ini
+!platform/budgetguard/
+!platform/migrations/
+!platform/sql/
+!slo/
+**/__pycache__

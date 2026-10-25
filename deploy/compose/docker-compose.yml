@@ -1,8 +1,12 @@
-# Compose (W1.7; rules W2.7; Alertmanager W3.3): the four services under test, Prometheus with the
-# generated SLO rules, Alertmanager and the blackbox exporter. `make secrets` first.
-# W4 adds TimescaleDB, Valkey, the platform and Grafana as in
+# Compose v2 (W4.1): the four services under test, Prometheus with the generated SLO rules,
+# Alertmanager and blackbox (W1-W3), plus TimescaleDB, Valkey, the platform (migrate job, API,
+# snapshotter x2), Grafana and the dashboard, as in
 # budgetguard-delivery-platform/references/manifests-and-workflows.md §1.
-# Run from the repo root inside WSL `Ubuntu-D`: make up   (image tags come from .env.versions)
+# Run from the repo root inside WSL `Ubuntu-D`: make up   (tags: .env.versions; secrets: make secrets)
+#
+# Credentials come from deploy/compose/secrets/local.env (generated, git-ignored) and, for the
+# GitHub App, the repo-root .env. Each process gets only the ones it uses, one database role each:
+# migrate = owner, platform = bg_app, Grafana = bg_grafana, dashboard = bg_auth.
 name: budgetguard
 
 x-svc: &svc
@@ -17,6 +21,29 @@ x-svc: &svc
     retries: 12
     start_period: 20s
   mem_limit: 512m
+
+x-platform: &platform
+  build: { context: ../.., dockerfile: platform/Dockerfile, args: { POLICY_VERSION: "${POLICY_VERSION:-unknown}" } }
+  image: budgetguard-platform:local
+  restart: unless-stopped
+  environment: &platform-env
+    BG_DATABASE_URL: "postgresql+asyncpg://bg_app:${BG_DB_APP_PASSWORD:?make secrets}@timescaledb:5432/budgetguard"
+    BG_VALKEY_URL: "redis://:${VALKEY_PASSWORD:?make secrets}@valkey:6379/0"
+    BG_PROMETHEUS_URL: http://prometheus:9090
+    BG_ALERTMANAGER_TOKEN: "${BG_ALERTMANAGER_TOKEN:?make secrets}"
+    BG_DASHBOARD_TOKEN: "${BG_DASHBOARD_TOKEN:?make secrets}"
+    BG_GITHUB_WEBHOOK_SECRET: "${BG_GITHUB_WEBHOOK_SECRET:?make secrets}"
+    # Placeholders until the GitHub App exists (W5): the platform boots, the webhook rejects everything.
+    BG_GITHUB_REPO: "${BG_GITHUB_REPO:-Rajarshi1-source/Budget_Guard}"
+    BG_GITHUB_REPO_ID: "${BG_GITHUB_REPO_ID:-0}"
+    BG_GITHUB_OWNER_ID: "${BG_GITHUB_OWNER_ID:-0}"
+    BG_GITHUB_INSTALLATION_ID: "${BG_GITHUB_INSTALLATION_ID:-0}"
+    BG_GITHUB_APP_ID: "${BG_GITHUB_APP_ID:-not-configured}"
+    BG_GITHUB_APP_PRIVATE_KEY: "${BG_GITHUB_APP_PRIVATE_KEY:-not-configured}"
+    BG_APPROVER_IDS: "${BG_APPROVER_IDS:-[]}"
+  depends_on:
+    migrate: { condition: service_completed_successfully }
+    valkey: { condition: service_healthy }
 
 services:
   auth-service:          { <<: *svc, build: ../../services/auth-service, ports: ["8081:8080"] }
@@ -38,6 +65,7 @@ services:
 
   prometheus:
     image: prom/prometheus:${PROMETHEUS_TAG:?set in .env.versions}
+    restart: unless-stopped                      # WSL stops Docker when no session is attached
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=35d          # a 30-day SLO needs more than the 15d default (B-10)
@@ -50,6 +78,7 @@ services:
 
   alertmanager:
     image: prom/alertmanager:${ALERTMANAGER_TAG:?set in .env.versions}
+    restart: unless-stopped                      # WSL stops Docker when no session is attached
     volumes:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - ./secrets:/etc/alertmanager/secrets:ro
@@ -57,6 +86,92 @@ services:
 
   blackbox:
     image: prom/blackbox-exporter:${BLACKBOX_TAG:?set in .env.versions}
+    restart: unless-stopped                      # WSL stops Docker when no session is attached
     volumes: ["./blackbox.yml:/etc/blackbox_exporter/config.yml:ro"]
 
-volumes: { prom: {} }
+  # ------------------------------------------------------------------ data layer
+  timescaledb:
+    image: timescale/timescaledb:${TIMESCALE_TAG:?set in .env.versions}   # TSL build, never -oss
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: budgetguard
+      POSTGRES_USER: bg
+      POSTGRES_PASSWORD: "${PG_PASSWORD:?make secrets}"
+    volumes: ["pg:/var/lib/postgresql"]            # PG 18 images keep data under a versioned subdirectory
+    ports: ["127.0.0.1:5432:5432"]                 # loopback only: for psql and the exit check
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U bg -d budgetguard"], interval: 5s, retries: 20 }
+
+  migrate:                                         # Alembic owns the schema; no initdb mount (A-18)
+    <<: *platform
+    restart: "no"
+    # `bg` is a shell builtin (job control) inside sh -c, so call the CLI module, not the script
+    command: ["sh", "-c", "alembic upgrade head && python -m budgetguard.rulegen.cli sync-slos /app/slo"]
+    environment:
+      BG_DATABASE_URL: "postgresql+asyncpg://bg:${PG_PASSWORD:?make secrets}@timescaledb:5432/budgetguard"
+      BG_DB_APP_PASSWORD: "${BG_DB_APP_PASSWORD:?make secrets}"     # 004 grants LOGIN with these
+      BG_DB_GRAFANA_PASSWORD: "${BG_DB_GRAFANA_PASSWORD:?make secrets}"
+      BG_DB_AUTH_PASSWORD: "${BG_DB_AUTH_PASSWORD:?make secrets}"
+    depends_on:
+      timescaledb: { condition: service_healthy }
+
+  valkey:
+    image: valkey/valkey:${VALKEY_TAG:?set in .env.versions}
+    restart: unless-stopped
+    environment: { VALKEY_PASSWORD: "${VALKEY_PASSWORD:?make secrets}" }
+    command: ["sh", "-c", "exec valkey-server --appendonly yes --requirepass \"$$VALKEY_PASSWORD\""]
+    volumes: ["valkey:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli --no-auth-warning -a \"$$VALKEY_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      retries: 20
+
+  # ------------------------------------------------------------------ platform
+  platform-api:
+    <<: *platform
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 10s
+      retries: 12
+
+  snapshotter:
+    <<: *platform
+    command: ["python", "-m", "budgetguard.workers.snapshotter", "--metrics-port", "9464",
+              "--backfill-hours", "${BG_BACKFILL_HOURS:-6}"]
+    deploy: { replicas: 2 }                        # one holds pg_try_advisory_lock(724001); the other waits
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_TAG:?set in .env.versions}
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?make secrets}"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      BG_DB_GRAFANA_PASSWORD: "${BG_DB_GRAFANA_PASSWORD:?make secrets}"   # read by the datasource file
+    volumes:
+      - ../../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports: ["3001:3000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  dashboard:
+    build: ../../dashboard
+    restart: unless-stopped
+    environment:
+      BUDGETGUARD_API: http://platform-api:8000
+      BUDGETGUARD_DASHBOARD_TOKEN: "${BG_DASHBOARD_TOKEN:?make secrets}"
+      AUTH_DATABASE_URL: "postgresql://bg_auth:${BG_DB_AUTH_PASSWORD:?make secrets}@timescaledb:5432/budgetguard"
+      BETTER_AUTH_URL: "${BETTER_AUTH_URL:-http://localhost:3000}"
+      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?make secrets}"
+      GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID:-}"      # sign-in (overrides) needs a GitHub OAuth app
+      GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET:-}"
+    ports: ["3000:3000"]
+    depends_on:
+      platform-api: { condition: service_healthy }
+
+volumes: { prom: {}, pg: {}, valkey: {}, grafana: {} }

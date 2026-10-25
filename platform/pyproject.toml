@@ -16,6 +16,8 @@ dependencies = [
   "pyyaml>=6.0",
   "numpy>=2.3",
   "scipy>=1.16",
+  "psycopg[binary]>=3.2",
+  "prometheus-client>=0.23",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +39,10 @@ target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI resolves these per request; they are its documented dependency-injection pattern
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Query"]
 
 [tool.mypy]
 python_version = "3.14"

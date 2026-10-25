@@ -1,0 +1,28 @@
+# W4.8. Anonymous viewers can send any query through /api/ds/query, so the SQL datasource logs in
+# as bg_grafana: read-only, an allowlist of tables (never overrides or the auth schema), 5 s cap
+# (platform/sql/004_roles.sql). The password comes from the container environment.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData: { timeInterval: 15s }
+  - name: TimescaleDB
+    uid: timescaledb
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: timescaledb:5432
+    user: bg_grafana
+    editable: false
+    jsonData:
+      database: budgetguard
+      sslmode: disable          # compose network only; k3s uses the in-cluster service
+      postgresVersion: 1800
+      timescaledb: true
+      maxOpenConns: 5
+    secureJsonData:
+      password: $BG_DB_GRAFANA_PASSWORD

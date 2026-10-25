@@ -1,0 +1,6 @@
+node_modules
+.next
+e2e
+tests
+*.log
+.env*

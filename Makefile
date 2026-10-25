@@ -3,7 +3,10 @@
 # rules/test-rules need uv in WSL (curl -LsSf https://astral.sh/uv/install.sh | sh); sloth-parity is W8.
 
 VERSIONS := deploy/compose/.env.versions
-COMPOSE  := docker compose --env-file $(VERSIONS) $(if $(wildcard .env),--env-file .env) -f deploy/compose/docker-compose.yml
+# Later env files win: generated local secrets override the placeholders an .env copied from
+# .env.example still holds; .env supplies what local.env lacks (the GitHub App, OAuth app).
+LOCALENV := deploy/compose/secrets/local.env
+COMPOSE  := docker compose --env-file $(VERSIONS) $(if $(wildcard .env),--env-file .env) $(if $(wildcard $(LOCALENV)),--env-file $(LOCALENV)) -f deploy/compose/docker-compose.yml
 K6_TAG   := $(shell sed -n 's/^K6_TAG=\([^ #]*\).*/\1/p' $(VERSIONS))
 K6       := docker run --rm -i --network budgetguard_default -v "$(CURDIR)/load:/load:ro" grafana/k6:$(K6_TAG)
 FAULT     = curl -fsS -H "X-BG-Fault-Token: $${BG_FAULTS_TOKEN:?export BG_FAULTS_TOKEN}" -H 'Content-Type: application/json'
@@ -11,9 +14,12 @@ FAULT     = curl -fsS -H "X-BG-Fault-Token: $${BG_FAULTS_TOKEN:?export BG_FAULTS
 PROM_TAG := $(shell sed -n 's/^PROMETHEUS_TAG=\([^ #]*\).*/\1/p' $(VERSIONS))
 PROMTOOL  = docker run --rm -v "$(CURDIR)/rules:/rules" --entrypoint sh prom/prometheus:$(PROM_TAG) -c
 
-.PHONY: up down ps logs load rules test-rules reload secrets status chaos-dead-service demo-fast-burn demo-dependency-outage demo-dead-service demo-reset cluster-up
+.PHONY: up compose-up backfill down ps logs load rules test-rules reload secrets status chaos-dead-service demo-fast-burn demo-dependency-outage demo-dead-service demo-reset cluster-up
 
 up: secrets rules                       ## build images from services/*/target and start the stack
+	$(MAKE) --no-print-directory compose-up
+
+compose-up:                             # separate target so COMPOSE re-reads the env files secrets just wrote
 	$(COMPOSE) up -d --build --wait
 
 rules:                                  ## regenerate rules and promtool tests from slo/*.yaml (CI fails on drift)
@@ -26,10 +32,15 @@ test-rules:                             ## promtool from the same image tag as t
 reload:                                 ## make Prometheus pick up regenerated rules
 	curl -fsS -X POST localhost:9090/-/reload
 
-secrets:                                ## create deploy/compose/secrets from the examples (never overwrites)
-	@mkdir -p deploy/compose/secrets
-	@for f in slack_page_url slack_ticket_url; do [ -f deploy/compose/secrets/$$f ] || cp deploy/compose/secrets.example/$$f deploy/compose/secrets/$$f; done
-	@[ -f deploy/compose/secrets/bg_token ] || cp deploy/compose/secrets.example/bg_token.example deploy/compose/secrets/bg_token
+secrets:                                ## generate deploy/compose/secrets (git-ignored; never overwrites)
+	@bash deploy/compose/gen-secrets.sh
+
+backfill:                               ## fill sli_buckets from Prometheus history (HOURS=720), refresh the aggregates
+	$(COMPOSE) stop snapshotter                     # the leader holds the advisory lock
+	$(COMPOSE) run --rm --no-deps snapshotter python -m budgetguard.workers.snapshotter --once --backfill-hours $${HOURS:-720}
+	$(COMPOSE) start snapshotter
+	@# bg_app cannot refresh (owner only); the policies alone only reach back 3 days
+	$(COMPOSE) exec -T timescaledb psql -U bg -d budgetguard -c "CALL refresh_continuous_aggregate('sli_hourly', NULL, NULL)" -c "CALL refresh_continuous_aggregate('sli_daily', NULL, NULL)"
 
 status:                                 ## live HEALTHY / AT_RISK / UNKNOWN per service and SLO (D-4)
 	cd platform && uv run bg status ../slo --prometheus http://localhost:9090

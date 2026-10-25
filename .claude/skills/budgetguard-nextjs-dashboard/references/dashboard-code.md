@@ -28,8 +28,11 @@ Route (app)
 Environment: `BUDGETGUARD_API`, `BUDGETGUARD_DASHBOARD_TOKEN`, `AUTH_DATABASE_URL`,
 `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`.
 Set `BETTER_AUTH_SECRET` for `next build` too (Better Auth logs an error at build time
-without it). Create Better Auth's tables once with its CLI migration (`npx @better-auth/cli migrate`) into
-the `auth` schema; re-check the CLI name at kickoff.
+without it). Better Auth's tables (schema `auth`): `@better-auth/cli` stopped at 1.4.x; from 1.5 the CLI is
+the `auth` package. The repo does not run either: `scripts/auth-schema.mjs` compiles the SQL with
+the installed better-auth's own planner (`getMigrations` from `better-auth/db/migration`) and
+Alembic migration `006` applies it as `bg_auth` (W4, 26 Oct 2026). The standalone image has no
+CLI, and one tool owns every schema. Regenerate after a better-auth upgrade.
 
 ## Files
 
@@ -952,7 +955,9 @@ RUN npm ci --no-audit --no-fund
 
 FROM node:24-alpine AS build
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
+# Better Auth logs an error during `next build` without a secret; this value exists only in the
+# build stage and never reaches the runtime image.
+ENV NEXT_TELEMETRY_DISABLED=1 BETTER_AUTH_SECRET=build-stage-placeholder-not-used-at-runtime
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

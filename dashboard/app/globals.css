@@ -1,0 +1,17 @@
+:root { --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6b66; --line:#e3e1da; --ok:#1f7a4d; --risk:#a35b00; --unk:#5b5bd6; --bad:#b42318; }
+@media (prefers-color-scheme: dark) { :root { --bg:#141413; --fg:#ecebe6; --muted:#a3a29b; --line:#2c2b28; --ok:#4cc38a; --risk:#f5a524; --unk:#9b9bf5; --bad:#f97066; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+.top { display:flex; gap:1.5rem; align-items:center; padding:.75rem 1rem; border-bottom:1px solid var(--line); }
+.top nav { display:flex; gap:1rem; flex:1; }
+a { color:inherit; }
+main { padding:1rem; max-width:1100px; margin:0 auto; }
+.cards { display:grid; gap:1rem; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); }
+.card { border:1px solid var(--line); border-radius:10px; padding:1rem; }
+.badge { display:inline-flex; gap:.35rem; align-items:center; font-weight:600; }
+.badge[data-state=healthy]{ color:var(--ok);} .badge[data-state=at_risk]{ color:var(--risk);} .badge[data-state=unknown]{ color:var(--unk);}
+.verdict[data-v=block]{ color:var(--bad);} .verdict[data-v=admit]{ color:var(--ok);} .verdict[data-v=admit_unverified]{ color:var(--risk);}
+.muted { color:var(--muted); } .num { font-variant-numeric: tabular-nums; }
+pre { overflow-x:auto; background:color-mix(in srgb, var(--fg) 5%, transparent); padding:.75rem; border-radius:8px; }
+table { border-collapse:collapse; width:100%; } td,th { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line); }
+.demo-note { font-size:.85rem; color:var(--muted); }
