@@ -1,0 +1,35 @@
+spring:
+  application:
+    name: inventory-service
+  threads:
+    virtual:
+      enabled: true
+server:
+  port: 8080
+  shutdown: graceful
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true          # /actuator/health/liveness and /readiness for Kubernetes + blackbox
+  metrics:
+    distribution:
+      slo:
+        http.server.requests: 300ms,500ms,800ms,2s   # publishes the le buckets the latency SLIs read
+budgetguard:
+  faults:
+    admin-enabled: ${BG_FAULTS_ADMIN:false}          # demo profile only (security-and-api.md T-7)
+    admin-token: ${BG_FAULTS_TOKEN:}
+bg:
+  inventory:
+    seed:                                           # demo stock; SKU-0 is always out of stock (409 path)
+      SKU-0: 0
+      SKU-1: 1000000000
+      SKU-2: 1000000000
+      SKU-3: 1000000000
+      SKU-4: 1000000000
+      SKU-5: 1000000000

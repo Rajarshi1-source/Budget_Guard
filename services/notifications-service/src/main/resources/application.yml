@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: notifications-service
+  threads:
+    virtual:
+      enabled: true
+server:
+  port: 8080
+  shutdown: graceful
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true          # /actuator/health/liveness and /readiness for Kubernetes + blackbox
+  metrics:
+    distribution:
+      slo:
+        http.server.requests: 300ms,500ms,800ms,2s   # publishes the le buckets the latency SLIs read
+budgetguard:
+  faults:
+    admin-enabled: ${BG_FAULTS_ADMIN:false}          # demo profile only (security-and-api.md T-7)
+    admin-token: ${BG_FAULTS_TOKEN:}
+bg:
+  notifications:
+    queue-capacity: 10000
+    per-channel-concurrency: 10                     # bulkhead: a slow email provider cannot starve SMS
+    max-attempts: 3
+    provider-failure-rate: ${BG_PROVIDER_FAILURE_RATE:0.0}

@@ -198,11 +198,11 @@ FAULT = curl -fsS -H "X-BG-Fault-Token: $${BG_FAULTS_TOKEN:?export BG_FAULTS_TOK
 
 demo-fast-burn:                         ## orders 20x self-inflicted for 15 min (99.9% SLO, 2% errors)
 	$(FAULT) -X POST localhost:8082/admin/faults -d '{"errorRate":0.02,"ttlSeconds":900}'
-	$(K6) run -e TARGET=http://orders-service:8080 /load/steady.js
+	$(K6) run -e BASE=http://orders-service:8080 /load/steady.js
 
 demo-dependency-outage:                 ## auth fails; orders must NOT be frozen (D-3)
 	$(FAULT) -X POST localhost:8081/admin/faults -d '{"errorRate":0.5,"ttlSeconds":900}'
-	$(K6) run -e TARGET=http://orders-service:8080 /load/steady.js
+	$(K6) run -e BASE=http://orders-service:8080 /load/steady.js
 
 demo-dead-service:                      ## inventory stops: UNKNOWN, never HEALTHY (D-4)
 	$(COMPOSE) stop inventory-service

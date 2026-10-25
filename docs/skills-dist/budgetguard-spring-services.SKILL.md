@@ -72,6 +72,13 @@ so it does not depend on a Resilience4j Spring Boot starter (none targets Boot 4
 thing to break on an upgrade. Verified: every `bg-common` class in this skill plus
 `references/fault-admin.md` compiles against Boot 4.1.2 and Resilience4j 2.4.0 on Java 21.
 
+**Wiring (found in W1):** each service's `@SpringBootApplication` scans only
+`dev.budgetguard.<service>`, so `dev.budgetguard.common` beans are never found by component
+scanning. `bg-common` registers `BgCommonAutoConfiguration` in
+`META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`; it imports the
+advice, tags config and fault controller and declares the convention, `FaultState`, `FaultFilter`,
+`FaultCrash` and a `CircuitBreakerRegistry` (`@ConditionalOnMissingBean`).
+
 Build on Windows: `mvnw.cmd -q -DskipTests package` from `services/`; CI uses `./mvnw verify`.
 
 ---
@@ -167,24 +174,36 @@ package dev.budgetguard.common.metrics;
 
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.TypeMismatchException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.web.server.ResponseStatusException;
 
+/**
+ * Classifies every failure for the error_origin label. Only real server faults count as "self";
+ * a dependency failure is "dep:&lt;service&gt;"; client errors (400, 404, 405, 409 …) are "none" and
+ * keep their status, so a bad request or an unknown path never burns the service's budget.
+ */
 @RestControllerAdvice
 public class ErrorOriginAdvice {
 
-    /** Thrown by DownstreamClient on dependency 5xx, timeout or connection failure. */
+    /** Thrown by DownstreamClient on dependency 5xx, timeout, connection failure or injected partition. */
     public static final class DownstreamException extends RuntimeException {
         private final String dependency;
+
         public DownstreamException(String dependency, String message, Throwable cause) {
             super(message, cause);
             this.dependency = dependency;
         }
-        public String dependency() { return dependency; }
+
+        public String dependency() {
+            return dependency;
+        }
     }
 
     @ExceptionHandler(DownstreamException.class)
@@ -199,26 +218,37 @@ public class ErrorOriginAdvice {
                 "circuit open: " + ex.getCausingCircuitBreakerName());
     }
 
-    @ExceptionHandler(ResponseStatusException.class)
-    ResponseEntity<ProblemDetail> status(ResponseStatusException ex, HttpServletRequest req) {
-        HttpStatus s = HttpStatus.valueOf(ex.getStatusCode().value());
-        return fail(req, s.is5xxServerError() ? "self" : "none", s, ex.getReason());
+    @ExceptionHandler({HttpMessageNotReadableException.class, TypeMismatchException.class})
+    ResponseEntity<ProblemDetail> unreadable(Exception ex, HttpServletRequest req) {
+        return fail(req, "none", HttpStatus.BAD_REQUEST, "malformed request");
     }
 
     @ExceptionHandler(Exception.class)
-    ResponseEntity<ProblemDetail> own(Exception ex, HttpServletRequest req) {
+    ResponseEntity<ProblemDetail> other(Exception ex, HttpServletRequest req) {
+        // ResponseStatusException, validation errors, unknown paths and wrong methods all implement
+        // ErrorResponse: keep their status; only a 5xx among them is self-inflicted.
+        if (ex instanceof ErrorResponse er) {
+            HttpStatusCode status = er.getStatusCode();
+            req.setAttribute(ErrorOriginObservationConvention.ATTR, status.is5xxServerError() ? "self" : "none");
+            return ResponseEntity.status(status).body(er.getBody());
+        }
         return fail(req, "self", HttpStatus.INTERNAL_SERVER_ERROR, "internal error");
     }
 
-    private ResponseEntity<ProblemDetail> fail(HttpServletRequest req, String origin, HttpStatus status, String detail) {
+    private static ResponseEntity<ProblemDetail> fail(HttpServletRequest req, String origin, HttpStatus status,
+                                                      String detail) {
         req.setAttribute(ErrorOriginObservationConvention.ATTR, origin);
         return ResponseEntity.status(status).body(ProblemDetail.forStatusAndDetail(status, detail));
     }
 }
 ```
 
-The `ResponseStatusException` handler matters: without it a deliberate `404` would hit the
-catch-all and be counted as a self-inflicted 500.
+Why the catch-all inspects `ErrorResponse` (bug in the first version of this skill, found in W1):
+a `@ExceptionHandler(Exception.class)` also catches Spring's own client errors (validation 400,
+unknown path 404, wrong method 405, `ResponseStatusException`), which would all become
+self-inflicted 500s and burn the budget. They implement `ErrorResponse`, so the handler keeps
+their status and labels them `none` (only a 5xx among them is `self`); unreadable JSON and type
+mismatches get an explicit 400. `bg-common`'s `MetricsContractTest` pins every case.
 
 ### Downstream client — timeouts, breaker, classification
 
@@ -280,7 +310,10 @@ public final class DownstreamClient {
 }
 ```
 
-Usage in orders: `auth.call(() -> auth.http().get().uri("/validate?t={t}", token).retrieve().body(Validation.class))`.
+Usage in orders: `auth.call(() -> auth.http().get().uri("/validate").header("Authorization", bearer).retrieve().body(Validation.class))`
+(the token travels in the header, never `?t=`: `security-and-api.md` §4.1). Translate expected
+dependency 4xx yourself (401 bad token, 409 no stock); an unexpected 4xx becomes a
+`DownstreamException` for that dependency.
 Base URLs come from config (`bg.downstream.auth-url`, …): `http://auth-service:8080` in
 compose, `http://auth.bg-apps.internal` in k3s. The k3s value goes through Traefik's internal
 entrypoint so Argo Rollouts' canary weights apply to service-to-service traffic too
@@ -342,6 +375,10 @@ public class FaultFilter extends OncePerRequestFilter {
     }
 }
 ```
+
+Injected errors are recorded with `uri="UNKNOWN"`: the filter answers before handler mapping, so
+no URI pattern exists yet. The SLO rules still count them (they only exclude `/actuator.*`) and
+the label stays bounded.
 
 Why `sendError` and not `throw`: exceptions thrown in a servlet filter never reach
 `@RestControllerAdvice`, so the label would be missing. Spring's observation filter runs
@@ -442,15 +479,16 @@ export default function () {
 ## 8. Tests worth having
 
 ```java
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@AutoConfigureObservability   // re-check the Boot 4.1 name; without it metrics export is off in tests
+@SpringBootTest
+@AutoConfigureMockMvc          // org.springframework.boot.webmvc.test.autoconfigure (Boot 4)
+@AutoConfigureMetrics          // org.springframework.boot.micrometer.metrics.test.autoconfigure; replaces AutoConfigureObservability
 class MetricsContractTest {
-    @Autowired TestRestTemplate rest;
+    @Autowired MockMvc mvc;      // TestRestTemplate moved to spring-boot-resttestclient in Boot 4
 
     @Test
     void emitsErrorOriginAndSloBuckets() {
-        rest.getForEntity("/boom", String.class);                   // test controller throwing IllegalStateException
-        String prom = rest.getForObject("/actuator/prometheus", String.class);
+        mvc.perform(get("/boom"));                                   // test controller throwing IllegalStateException
+        String prom = mvc.perform(get("/actuator/prometheus")).andReturn().getResponse().getContentAsString();
         assertThat(prom).contains("error_origin=\"self\"");
         assertThat(prom).contains("service=\"orders-service\"");
         assertThat(prom).contains("le=\"0.5\"");
@@ -459,7 +497,9 @@ class MetricsContractTest {
 ```
 
 Also: a 404 is `error_origin="none"`; an auth 503 through `DownstreamClient` is
-`dep:auth-service`; an open breaker is `dep:auth-service` with status 503.
+`dep:auth-service`; an open breaker is `dep:auth-service` with status 503. The implemented tests
+(30, all passing in W1) live in `services/*/src/test`: orders uses a JDK `HttpServer` stub for its
+three dependencies, so every origin path goes over real HTTP.
 
 ## 9. Interview soundbites
 

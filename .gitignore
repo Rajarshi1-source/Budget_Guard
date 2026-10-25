@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# image tags only, no secrets
+!deploy/compose/.env.versions
 *.pem
 *.key
 *.kubeconfig
