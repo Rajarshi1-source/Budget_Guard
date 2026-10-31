@@ -405,6 +405,16 @@ Run it in `ci.yml`; a mismatch means one of the generators changed semantics.
 
 ---
 
+As built in W8: `bg parity ../slo -o ../rules/parity [--check]` writes `<svc>.sloth.yaml` and
+`<svc>.parity.test.yaml`; CI regenerates `<svc>.sloth.rules.yaml` with
+`ghcr.io/slok/sloth:v0.16.0` by digest, fails on a diff, then runs promtool. The parity test feeds
+6 h at 0.4% errors and then 1 h at 4%, so every window differs, and compares `round(abs(sum(bg) -
+sum(sloth)), 1e-9)` at 5m/30m/1h/6h. A missing series on either side leaves no sample, so the test
+fails. **Sloth's 30d ratio averages 5-minute ratios** (`sum_over_time / count_over_time`), so it
+is not request-weighted; parity is asserted at the short windows only. `bg import openslo` brings
+in ratio SLOs (Occurrences, rolling 30d/28d, bare selectors) with the Workbook tiers and refuses
+everything else with a reason.
+
 ## 5. Prometheus and Alertmanager config
 
 ```yaml

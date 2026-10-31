@@ -297,6 +297,7 @@ else → "Override failed; nothing was approved".
 | `GET /livez` | kubelet | none | cluster only; event loop alive, no dependency checks |
 | `GET /readyz` | kubelet | none | cluster only; PostgreSQL + Valkey ping; 503 names the failing type, not the error text |
 | `GET /metrics` | Prometheus | none | cluster only; NetworkPolicy allows `monitoring`; breaker states, queue depth, `bg_webhook_foreign_total`, `bg_auth_failures_total{endpoint,reason}` |
+| worker metrics `:9464` snapshotter, `:9465` reconcilers, `:9466` gate-worker (W8) | Prometheus | none | cluster only; NetworkPolicy `snapshotter-metrics` allows `monitoring`; leader gauge, drift gauges, `bg_verdict_latency_seconds` |
 
 ---
 
@@ -486,7 +487,9 @@ Tokens are cached per scope for 50 minutes in process memory only (never in Valk
 As built (W5-W6): the gate worker's read token is `{"contents": "read", "pull_requests": "read"}`
 (git trees for the rollback proof; PR, files and commits for change features and the incident-fix lane);
 the callback token is `{"deployments": "write"}`; the re-run token `{"actions": "write"}`; the
-reconcilers' token `{"deployments": "read"}` plus the App JWT for `/app/hook/deliveries`.
+reconcilers' tokens `{"deployments": "read"}` (bypass) and `{"actions": "read"}` (environment drift,
+W8) plus the App JWT for `/app/hook/deliveries`. Inside the cluster the reconcilers use their own
+service account to list Rollouts in `bg-apps`, read-only (`deploy/helm/platform/templates/rbac.yaml`).
 The brief writer (W7) comments on the merged PR with `{"pull_requests": "write"}`, only for the
 configured installation; the CI DSNs above are optional (each step skips with a notice when unset).
 
@@ -723,10 +726,10 @@ hardening).
 | 9 | Incident-fix lane also requires a firing `ALERTS` series | `lanes.py` |
 | 10 | Public-path guard middleware | new `edge.py` |
 | 11 | Redelivery reconciler (GitHub does not redeliver automatically) | new `workers/reconcilers.py`; corrects the delivery skill's chaos-drill row. **Done W5** (plus admin-bypass ingestion) |
-| 12 | Environment drift and cluster digest drift reconcilers | `workers/reconcilers.py` |
+| 12 | Environment drift and cluster digest drift reconcilers | `workers/reconcilers.py`. **Done W8**: environment check (token `{"actions": "read"}`) → `bg_gate_config_drift` → `GateConfigDrift` page; Rollout stamps `budgetguard.dev/git-sha` + `image-digest` (deploy.yml) compared with the live image and admitted decisions → `CLUSTER_DRIFT` decision + override by `cluster-admin-drift` → `ClusterDigestDrift` page; reconcilers pod is the only one with a service-account token (Role: get/list Rollouts in bg-apps) |
 | 13 | `cosign verify --certificate-github-workflow-sha` | `deploy.yml`. **Done W5** |
 | 14 | CODEOWNERS covers `/.github/workflows/` and `/deploy/`; actions pinned by SHA | `.github/CODEOWNERS`, all workflows. **Done W5**; `scripts/lint_workflows.py` fails CI on an unpinned action or a KUBECONFIG reference outside an environment job |
-| 15 | `bg_grafana` read-only role; Prometheus query limits | `003_roles.sql`, Prometheus args |
+| 15 | `bg_grafana` read-only role; Prometheus query limits | `003_roles.sql`, Prometheus args. **Done W8**: `--query.timeout=30s`, `--query.max-concurrency=10`, `--query.max-samples=30000000` (compose and `kps-values.yaml`), Grafana `queryTimeout: 30s` |
 | 16 | `bg-apps` NetworkPolicy; Valkey password | delivery charts. **Done W5**: `deploy/k3s/bg-apps-networkpolicy.yaml` (Traefik + monitoring only, applied by bootstrap, not by the deployer), `deploy/k3s/data.yaml` |
 | 17 | auth-service `/validate` takes the token in a header, not `?t=` | `budgetguard-spring-services` client and controller |
-| 18 | Dual dashboard and Alertmanager tokens during rotation | `config.py`, `auth.py` |
+| 18 | Dual dashboard and Alertmanager tokens during rotation | `config.py`, `auth.py`. **W8**: a blank rotation slot is unset and an empty token never matches (compose passes `${X_NEXT:-}` as ""); a blank required secret fails at boot; drill in `docs/runbooks/secret-rotation.md` |

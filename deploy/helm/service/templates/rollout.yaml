@@ -11,6 +11,9 @@ spec:
   template:
     metadata:
       labels: { app: {{ .Values.service }} }
+      annotations:                                # what the deploy job admitted; the drift reconciler
+        budgetguard.dev/git-sha: {{ .Values.release.sha | quote }}               # compares the running
+        budgetguard.dev/image-digest: {{ .Values.image.digest | quote }}         # image with these
     spec:
       securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
       containers:

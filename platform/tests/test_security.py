@@ -205,3 +205,20 @@ def test_oidc_rejects_hs256_signed_with_public_key():
                          "iat": int(time.time())} | OK, "x" * 32, algorithm="HS256")
     with pytest.raises(jwt.PyJWTError):
         auth.verify_actions_oidc(forged, "production-orders-service", 777, key_for=lambda _: pem)
+
+
+def test_blank_rotation_slots_are_unset_and_never_match() -> None:
+    """compose passes `${BG_DASHBOARD_TOKEN_NEXT:-}` as "" (W8.5 rotation drill)."""
+    from pydantic import SecretStr, ValidationError
+
+    from budgetguard.auth import _matches
+    from budgetguard.config import Settings
+
+    s = Settings(dashboard_token_next="", alertmanager_token_next="  ", github_webhook_secret_previous="")
+    slots = (s.dashboard_token_next, s.alertmanager_token_next, s.github_webhook_secret_previous)
+    assert slots == (None, None, None)
+    assert s.webhook_secrets() == ["whsec"]
+    assert not _matches("", SecretStr(""), None)
+    assert not _matches("", SecretStr("dashtoken"))
+    with pytest.raises(ValidationError, match="blank"):
+        Settings(dashboard_token="")

@@ -4,7 +4,7 @@ metadata: { name: budgetguard-platform, labels: { release: kube-prometheus-stack
 spec:
   jobLabel: app
   selector:
-    matchExpressions: [{ key: app, operator: In, values: [platform-api, snapshotter] }]
+    matchExpressions: [{ key: app, operator: In, values: [platform-api, snapshotter, reconcilers, gate-worker] }]
   podMetricsEndpoints:
     - { port: http, path: /metrics, interval: 15s }      # bg_prometheus_reachable (BudgetGuardBlind)
-    - { port: metrics, path: /, interval: 30s }          # snapshotter leader and last bucket
+    - { port: metrics, path: /, interval: 30s }          # snapshotter, reconcilers, gate-worker latency

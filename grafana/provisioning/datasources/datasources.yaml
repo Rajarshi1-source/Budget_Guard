@@ -10,7 +10,7 @@ datasources:
     url: ${BG_PROMETHEUS_URL}           # compose: http://prometheus:9090; k3s: kube-prometheus-stack
     isDefault: true
     editable: false
-    jsonData: { timeInterval: 15s }
+    jsonData: { timeInterval: 15s, queryTimeout: 30s }   # matches Prometheus --query.timeout
   - name: TimescaleDB
     uid: timescaledb
     type: grafana-postgresql-datasource

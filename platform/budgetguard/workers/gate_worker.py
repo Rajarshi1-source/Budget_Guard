@@ -28,12 +28,14 @@ import logging
 import random
 import socket
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from prometheus_client import Histogram, start_http_server
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -66,6 +68,14 @@ log = logging.getLogger("budgetguard.gate_worker")
 STREAM, GROUP = "bg:gate-evaluations", "gate-workers"
 DEAD, BRIEFS, PENDING = "bg:gate-dead", "bg:briefs", "bg:records-pending"
 LOCK_MS, CACHE_S, CLAIM_IDLE_MS = 15_000, 30, 60_000
+VERDICT_LATENCY = Histogram(
+    "bg_verdict_latency_seconds", "Enqueue (stream entry id) to decision recorded and callback attempted",
+    ["source"], buckets=(0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 8, 13, 21, 34, 60, 120))
+
+
+def queued_seconds(entry_id: str, now_s: float) -> float:
+    """A stream entry id is `<enqueue ms>-<seq>`: the wait includes queueing, not only evaluation."""
+    return max(now_s - int(entry_id.split("-", 1)[0]) / 1000.0, 0.0)
 RELEASE = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
 return 0
@@ -190,15 +200,22 @@ async def _callback(ctx: Context, job: dict[str, Any], approved: bool, comment: 
     return False
 
 
-async def _mark_callback(ctx: Context, decision_id: int | None, sent: bool) -> None:
-    if ctx.engine is None or decision_id is None:
-        return
-    try:
-        async with ctx.engine.begin() as c:
-            await c.execute(text("UPDATE decisions SET callback_state = :s WHERE id = :i"),
-                            {"s": "sent" if sent else "failed", "i": decision_id})
-    except DB_DOWN:
-        log.warning("could not record callback state for decision %s", decision_id)
+async def _mark_callback(ctx: Context, decision_id: int | None, sent: bool, delivery: str) -> None:
+    """Record the callback outcome. A buffered decision (PostgreSQL down, no id yet) gets its outcome
+    queued behind its record in bg:records-pending, so the replayed row does not say 'pending'
+    forever (found in the W8.6 chaos drill)."""
+    state = "sent" if sent else "failed"
+    if ctx.engine is not None and decision_id is not None:
+        try:
+            async with ctx.engine.begin() as c:
+                await c.execute(text("UPDATE decisions SET callback_state = :s WHERE id = :i"),
+                                {"s": state, "i": decision_id})
+            return
+        except DB_DOWN:
+            log.warning("could not record callback state for decision %s", decision_id)
+    if ctx.valkey is not None:
+        await ctx.valkey.xadd(PENDING, {"callback": json.dumps({"delivery": delivery, "state": state})},
+                              maxlen=10_000, approximate=True)
 
 
 UNKNOWN_CHANGE = Change(ChangeFeatures.unknown(), None,
@@ -236,7 +253,7 @@ async def _gather(ctx: Context, job: dict[str, Any], sl: ServiceLevel,
             return UNKNOWN_CHANGE
 
     async with asyncio.TaskGroup() as tg:
-        s = tg.create_task(gather_signals(ctx.prom, ctx.engine, sl, now))
+        s = tg.create_task(gather_signals(ctx.prom, ctx.engine, sl, now, ctx.settings.history_source))
         h = tg.create_task(hist())
         t = tg.create_task(tree())
         c = tg.create_task(change())
@@ -299,7 +316,7 @@ async def evaluate_job(ctx: Context, job: dict[str, Any]) -> Outcome:
                 return Outcome("duplicate", prev.id)
             approved = prev.verdict != "block"
             sent = await _callback(ctx, job, approved, prev.comment or decision_url(ctx.settings, prev.id))
-            await _mark_callback(ctx, prev.id, sent)
+            await _mark_callback(ctx, prev.id, sent, job["delivery"])
             return Outcome("resent", prev.id)
 
     cache_key, cached = await _cached(ctx, sl.metadata.service, job["sha"])
@@ -370,7 +387,7 @@ async def evaluate_job(ctx: Context, job: dict[str, Any]) -> Outcome:
             "tree_sha": tree_sha, "change": _change_json(change), "at": now.isoformat()}), ex=CACHE_S)
 
     sent = await _callback(ctx, job, d.verdict is not Verdict.BLOCK, comment)
-    await _mark_callback(ctx, decision_id, sent)
+    await _mark_callback(ctx, decision_id, sent, job["delivery"])
     if ctx.valkey is not None and decision_id is not None:
         await ctx.valkey.xadd(BRIEFS, {"decision_id": str(decision_id)}, maxlen=10_000, approximate=True)
     return Outcome(status, decision_id, d)
@@ -404,14 +421,21 @@ def _decision_params(job: dict[str, Any], gi: GateInput, d: Decision,
 
 
 async def replay_pending(ctx: Context) -> int:
-    """Drain bg:records-pending into decisions once PostgreSQL is back (ON CONFLICT DO NOTHING)."""
+    """Drain bg:records-pending once PostgreSQL is back, in stream order: a decision record
+    (ON CONFLICT DO NOTHING), then the callback outcome queued behind it."""
     if ctx.valkey is None or ctx.engine is None:
         return 0
     n = 0
     for entry_id, fields in await ctx.valkey.xrange(PENDING, count=100):
         try:
             async with ctx.engine.begin() as c:
-                await c.execute(INSERT_DECISION, json.loads(fields["record"]))
+                if "record" in fields:
+                    await c.execute(INSERT_DECISION, json.loads(fields["record"]))
+                elif "callback" in fields:
+                    cb = json.loads(fields["callback"])
+                    await c.execute(text("UPDATE decisions SET callback_state = :s "
+                                         "WHERE github_delivery = :d AND callback_state = 'pending'"),
+                                    {"s": cb["state"], "d": cb["delivery"]})
         except DB_DOWN:
             return n
         await ctx.valkey.xdel(PENDING, entry_id)
@@ -437,8 +461,10 @@ async def handle(ctx: Context, entry_id: str, fields: dict[str, str]) -> None:
         await asyncio.sleep(0.5)                     # single-flight; the lock expires after 15 s at most
     try:
         out = await evaluate_job(ctx, job)
-        log.info("%s %s %s -> %s %s", job["service"], job["sha"][:7], job["delivery"], out.status,
-                 out.decision.reason_code if out.decision else "")
+        waited = queued_seconds(entry_id, time.time())
+        VERDICT_LATENCY.labels(ctx.settings.history_source).observe(waited)
+        log.info("%s %s %s -> %s %s latency_ms=%d", job["service"], job["sha"][:7], job["delivery"],
+                 out.status, out.decision.reason_code if out.decision else "", waited * 1000)
     except JobRejected as e:
         await _dead(ctx, entry_id, fields, str(e))
         return
@@ -517,7 +543,10 @@ async def ensure_policy(engine: AsyncEngine, policy: Policy) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="gate_worker")
     ap.add_argument("--consumer", default=socket.gethostname())
+    ap.add_argument("--metrics-port", type=int, default=None)
     a = ap.parse_args(argv)
+    if a.metrics_port is not None:
+        start_http_server(a.metrics_port)
     redact.install()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)

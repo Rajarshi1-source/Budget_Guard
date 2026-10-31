@@ -4,6 +4,10 @@ prometheus:
     retention: 35d                       # a 30-day SLO needs more than the default
     retentionSize: 8GB
     scrapeInterval: 15s
+    query:                               # security #15: same limits as compose (anonymous Grafana viewers)
+      timeout: 30s
+      maxConcurrency: 10
+      maxSamples: 30000000               # 30 d x 15 s = 172,800 samples/series: ~170 series per query
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
     resources: { requests: { memory: 768Mi }, limits: { memory: 1280Mi } }

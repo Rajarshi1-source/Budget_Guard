@@ -21,12 +21,12 @@ export async function replayAction(_: ReplayState, form: FormData): Promise<Repl
 
 /** Overrides: the dashboard proves who the human is; the API decides whether they may. */
 export async function overrideAction(_: OverrideState, form: FormData): Promise<OverrideState> {
+  const parsed = OverrideInput.safeParse({ decisionId: form.get("decisionId"), reason: form.get("reason") });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
+
   const h = await headers();
   const session = await auth.api.getSession({ headers: h });
   if (!session) return { error: "Sign in with GitHub first" };
-
-  const parsed = OverrideInput.safeParse({ decisionId: form.get("decisionId"), reason: form.get("reason") });
-  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
 
   // better-auth 1.7 selects by the local account row id, not by provider name.
   const accounts = await auth.api.listUserAccounts({ headers: h });

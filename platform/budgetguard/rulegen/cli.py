@@ -3,6 +3,8 @@
   bg generate ../slo -o ../rules/generated [--check] [--format prometheus|prometheus-operator]
   bg tests ../slo -o ../rules/tests/generated [--check]
   bg export sloth ../slo/orders-service.yaml > orders.sloth.yaml
+  bg parity ../slo -o ../rules/parity [--check]   # Sloth inputs + promtool parity tests (D-8)
+  bg import openslo slo.openslo.yaml --job orders-service --min-events 600 > ../slo/orders.yaml
   bg status ../slo [--prometheus http://localhost:9090] [--json]   # live tri-state verdicts (D-4)
   bg sync-slos ../slo [--database-url URL]   # upsert services/slos rows; spec_hash detects drift
 """
@@ -31,6 +33,15 @@ def main(argv: list[str] | None = None) -> int:
     e = sub.add_parser("export", help="interop exports")
     e.add_argument("target", choices=("sloth",))
     e.add_argument("spec", type=Path)
+    pa = sub.add_parser("parity", help="Sloth specs and promtool parity tests (D-8)")
+    pa.add_argument("slo_dir", type=Path)
+    pa.add_argument("-o", "--out", type=Path, required=True)
+    pa.add_argument("--check", action="store_true", help="fail if committed files differ")
+    im = sub.add_parser("import", help="interop imports (ratio SLOs only)")
+    im.add_argument("source", choices=("openslo",))
+    im.add_argument("path", type=Path)
+    im.add_argument("--job", required=True, help="Prometheus scrape job for the integrity alert")
+    im.add_argument("--min-events", type=int, required=True, help="traffic floor per hour")
     st = sub.add_parser("status", help="live HEALTHY / AT_RISK / UNKNOWN per service and SLO")
     st.add_argument("slo_dir", type=Path)
     st.add_argument("--prometheus", default="http://localhost:9090")
@@ -49,6 +60,13 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "export":
         from .sloth import export_sloth
         sys.stdout.write(export_sloth(a.spec))
+        return 0
+    if a.cmd == "parity":
+        from .sloth import write_parity
+        return write_parity(a.slo_dir, a.out, check=a.check)
+    if a.cmd == "import":
+        from .openslo import import_openslo
+        sys.stdout.write(import_openslo(a.path, job=a.job, min_events_per_hour=a.min_events))
         return 0
     if a.cmd == "status":
         return asyncio.run(_status(a.slo_dir, a.prometheus, a.json))

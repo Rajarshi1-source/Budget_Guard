@@ -149,3 +149,27 @@ async def test_query_time_must_be_timezone_aware() -> None:
     async with fake(lambda q: []) as http:
         with pytest.raises(ValueError, match="timezone"):
             await PrometheusClient("http://prom:9090", http).query("up", at=datetime(2026, 10, 26))
+
+
+async def test_raw_windows_reads_30d_increase_from_raw_counters() -> None:
+    """Option A (W8.7): the same (total, bad, self_bad) shape the buckets give, from increase()[30d]."""
+    from pathlib import Path
+
+    from budgetguard.gather import raw_windows
+    from budgetguard.rulegen.spec import load
+
+    sl = load(Path(__file__).resolve().parents[2] / "slo" / "orders-service.yaml")
+    asked: list[str] = []
+
+    class Prom:
+        async def scalar(self, expr: str) -> float | None:
+            asked.append(expr)
+            if 'le="0.5"' in expr:
+                return 990.0                                   # fast requests
+            if 'error_origin="self"' in expr:
+                return 3.0
+            return 10.0 if 'status=~"5.."' in expr else 1000.0
+
+    got = await raw_windows(Prom(), sl)  # type: ignore[arg-type]
+    assert got == {"availability": (1000.0, 10.0, 3.0), "latency": (1000.0, 10.0, 10.0)}
+    assert all("[30d]" in q and q.startswith("sum(increase(") for q in asked)

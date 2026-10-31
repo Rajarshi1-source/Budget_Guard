@@ -143,6 +143,21 @@ bg:gate-evaluations gate-workers` → the callback state on the decision row.
 
 ---
 
+## 5a. As built in W8 (31 Oct 2026)
+
+| Point | Rule |
+| --- | --- |
+| Drift stamps | deploy.yml passes `release.sha`; the Rollout's pod template carries `budgetguard.dev/git-sha` and `budgetguard.dev/image-digest` for the cluster drift reconciler |
+| Tokens | only the `reconcilers` pod mounts a service-account token (Role `budgetguard-rollouts-reader`: get/list Rollouts in `bg-apps`); every other worker sets `automountServiceAccountToken: false` |
+| Metrics | worker ports 9464 snapshotter, 9465 reconcilers, 9466 gate-worker; PodMonitor and NetworkPolicy cover all three |
+| Query limits | Prometheus `--query.timeout=30s --query.max-concurrency=10 --query.max-samples=30000000` in compose and `kps-values.yaml` |
+| Chaos drill | `deploy/compose/chaos-drill.sh`; results and the corrected redelivery row in `docs/runbooks/chaos-drill.md` |
+| Rotation drill | `deploy/compose/rotation-drill.sh`, results in `docs/runbooks/secret-rotation.md` |
+| D-7 measurement | `load/canary-share.sh`: chart on k3s-in-Docker with whoami, share counted per answering pod, via Traefik vs per replica |
+| Merge storm | `load/merge-storm.js` + `load/bench-ab.sh` (option A vs C verdict latency) |
+| Workflow lint | rule 3: no `${{ }}` inside `run:` |
+| Helm 4 + Argo Rollouts | `helm upgrade --install --server-side=false` for the service chart: with server-side apply (Helm 4's default) the upgrade that starts each canary conflicts with `rollouts-controller` on the Services' selectors and the TraefikService weights. Never `--force-conflicts` (it strips the pod-hash selector mid-rollout) |
+
 ## 6. Interview soundbites
 
 - "Deleting the environment line doesn't bypass the gate, because the cluster credentials

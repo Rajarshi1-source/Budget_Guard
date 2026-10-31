@@ -151,6 +151,22 @@ def platform_groups() -> list[dict[str, Any]]:
          "labels": {"severity": "page", "service": "budgetguard", "incident_type": "budgetguard_blind"},
          "annotations": {"summary": "BudgetGuard cannot query Prometheus: integrity is STALE, each service's "
                                     "failure_mode decides (fail-open admits as admit_unverified)"}},
+        {"alert": "GateConfigDrift",                                        # reconcilers (W8.5, T-4)
+         "expr": "max by (service, reason) (bg_gate_config_drift) > 0",
+         "labels": {"severity": "page", "incident_type": "gate_config_drift"},
+         "annotations": {"summary": "production-{{ $labels.service }} does not enforce the BudgetGuard gate "
+                                    "({{ $labels.reason }}): deploys can run without a decision"}},
+        {"alert": "ClusterDigestDrift",
+         "expr": "max by (service) (bg_cluster_digest_drift) > 0",
+         "labels": {"severity": "page", "incident_type": "cluster_digest_drift"},
+         "annotations": {"summary": "{{ $labels.service }} runs an image no admitted deploy job set; "
+                                    "recorded as an override by cluster-admin-drift"}},
+        {"alert": "ReconcilersStale",
+         "expr": "time() - max by (check) (bg_reconciler_last_success_timestamp_seconds) > 1800",
+         "for": "5m",
+         "labels": {"severity": "ticket", "service": "budgetguard", "incident_type": "reconcilers_stale"},
+         "annotations": {"summary": "The {{ $labels.check }} reconciler has not completed for 30 minutes: "
+                                    "drift and failed deliveries are not being caught"}},
         {"alert": "Watchdog",
          "expr": "vector(1)",
          "labels": {"severity": "none", "service": "budgetguard", "incident_type": "heartbeat"},

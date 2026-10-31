@@ -117,6 +117,8 @@ async def test_postgres_down_buffers_the_record_before_answering_github() -> Non
     assert record["inputs_hash"] and inputs["facts"]["case_id"] == "d-1"
     assert inputs["gate_input"]["remaining_pct"] == pytest.approx(90.0)     # the increase30d fallback
     assert record["verdict"] == "admit" and posts[0][1] is True             # no history: prior 0.75% < 42.5%
+    callback = json.loads(v.streams[gw.PENDING][1][1]["callback"])          # queued behind the record
+    assert callback == {"delivery": record["delivery"], "state": "sent"}
 
 
 async def test_both_stores_down_leaves_the_run_waiting() -> None:
@@ -218,3 +220,10 @@ def test_only_an_over_budget_block_has_an_affordability_eta() -> None:
     page = Decision(Verdict.BLOCK, "ACTIVE_PAGE", "page firing")
     c = template_comment("orders-service", page, "u", None, 87.7)
     assert "clears when the page-level burn alert resolves" in c and "affordable:" not in c
+
+
+def test_queued_seconds_reads_the_enqueue_time_from_the_entry_id() -> None:
+    from budgetguard.workers.gate_worker import queued_seconds
+
+    assert queued_seconds("1730000000000-3", 1730000001.25) == 1.25
+    assert queued_seconds("1730000005000-0", 1730000001.0) == 0.0      # clock skew never goes negative
