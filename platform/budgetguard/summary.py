@@ -38,6 +38,7 @@ class SloInputs:
     window: Window | None             # from sli_buckets; None = no buckets yet
     daily: Sequence[tuple[date, float, float]] = ()   # (day, bad, total), oldest first, up to 59 days
     eta_buckets: Sequence[Bucket] = ()               # 30 days of 5-minute buckets, only when frozen
+    self_share_1h: float | None = None                # paging SLOs: the gate's gather.self_share
 
 
 def remaining(objective: float, w: Window | None, self_only: bool = False) -> float | None:
@@ -66,10 +67,14 @@ def gate_remaining(slo: Slo, w: Window | None, attribution: str) -> float | None
     return remaining(slo.objective, w, self_only=attribution == "charge_origin" and bool(slo.sli.self_bad))
 
 
-def _freeze_reasons(sl: ServiceLevel, slo: Slo, st: SloStatus, rem: float | None) -> tuple[bool, bool]:
-    """(frozen by an alert, frozen by budget) for one SLO, per the spec's gate block."""
+def _freeze_reasons(sl: ServiceLevel, slo: Slo, st: SloStatus, rem: float | None,
+                    self_share: float | None, attribution: str,
+                    self_page_share: float) -> tuple[bool, bool]:
+    """(frozen by an alert, frozen by budget) for one SLO, the way the gate decides: under
+    charge_origin a page freezes only when it is mostly self-inflicted (D-3)."""
     hard = sl.spec.gate.hard_stop_on
-    by_alert = ("page" in hard and st.page_firing) or ("ticket" in hard and st.ticket_firing)
+    page = st.page_firing and (attribution != "charge_origin" or (self_share or 0.0) >= self_page_share)
+    by_alert = ("page" in hard and page) or ("ticket" in hard and st.ticket_firing)
     by_budget = rem is not None and rem < sl.spec.gate.reserve_pct
     return by_alert, by_budget
 
@@ -77,7 +82,7 @@ def _freeze_reasons(sl: ServiceLevel, slo: Slo, st: SloStatus, rem: float | None
 def service_card(sl: ServiceLevel, inputs: dict[str, SloInputs], *, now: datetime,
                  open_incident: dict[str, Any] | None,
                  last_decision: dict[str, Any] | None,
-                 attribution: str = "charge_origin") -> dict[str, Any]:
+                 attribution: str = "charge_origin", self_page_share: float = 0.5) -> dict[str, Any]:
     states, integrities, etas = [], [], []
     alert_frozen = budget_frozen = False
     for slo in sl.spec.slos:
@@ -89,7 +94,8 @@ def service_card(sl: ServiceLevel, inputs: dict[str, SloInputs], *, now: datetim
         states.append(sli_state(i.status.integrity, rem, i.status.page_firing, i.status.ticket_firing,
                                 sl.spec.gate.reserve_pct))
         gate_rem = gate_remaining(slo, i.window, attribution)
-        by_alert, by_budget = _freeze_reasons(sl, slo, i.status, rem if gate_rem is None else gate_rem)
+        by_alert, by_budget = _freeze_reasons(sl, slo, i.status, rem if gate_rem is None else gate_rem,
+                                              i.self_share_1h, attribution, self_page_share)
         alert_frozen |= by_alert
         if by_budget:
             budget_frozen = True
