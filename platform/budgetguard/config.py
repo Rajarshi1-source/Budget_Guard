@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +18,7 @@ class CoreSettings(BaseSettings):
     valkey_url: str = "redis://valkey:6379/0"
     prometheus_url: str = "http://prometheus:9090"
     prometheus_timeout_s: float = 3.0
+    history_source: Literal["buckets", "raw"] = "buckets"   # "raw" only to measure option A (W8.7)
     slo_dir: Path = Path("slo")                      # the ServiceLevel specs (copied into the image)
     prompt_dir: Path = Path("prompts")               # Freeze Brief prompts, versioned by sha256 (W7)
     llm_config: Path = Path("config/llm.yaml")       # the only place a model name appears
@@ -40,6 +42,22 @@ class Settings(CoreSettings):
     policy_version: str = "unknown"                  # baked into the image: git log -1 --format=%H -- policy/
     policy_file: Path = Path("../policy/freeze-policy.yaml")   # the image sets /app/policy/freeze-policy.yaml
     public_url: str = "https://budgetguard.example.dev"
+    apps_namespace: str = "bg-apps"                  # Rollouts the cluster drift reconciler reads (W8.5)
+
+    @field_validator("github_webhook_secret", "alertmanager_token", "dashboard_token")
+    @classmethod
+    def _required_not_blank(cls, v: SecretStr) -> SecretStr:
+        if not v.get_secret_value().strip():
+            raise ValueError("secret is blank")
+        return v
+
+    @field_validator("github_webhook_secret_previous", "alertmanager_token_next", "dashboard_token_next",
+                     mode="before")
+    @classmethod
+    def _blank_is_unset(cls, v: object) -> object:
+        """compose writes `${X_NEXT:-}` as "": an empty rotation slot must not become a secret that an
+        empty bearer token (or an HMAC with an empty key) would match (found in the W8.5 drill)."""
+        return None if isinstance(v, str) and not v.strip() else v
 
     def webhook_secrets(self) -> list[str]:
         """Current secret first, then the previous one while a rotation is in progress."""

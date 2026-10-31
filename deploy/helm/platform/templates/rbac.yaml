@@ -1,0 +1,21 @@
+# The cluster digest drift reconciler (W8.5, security-and-api.md T-4) reads Rollouts in the apps
+# namespace: get and list only, no Secrets, no writes. Every other platform pod mounts no token.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: reconcilers }
+automountServiceAccountToken: false            # the Deployment opts in (bg.worker serviceAccount)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: budgetguard-rollouts-reader, namespace: {{ .Values.appsNamespace }} }
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [rollouts]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: budgetguard-rollouts-reader, namespace: {{ .Values.appsNamespace }} }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: budgetguard-rollouts-reader }
+subjects:
+  - { kind: ServiceAccount, name: reconcilers, namespace: {{ .Release.Namespace }} }

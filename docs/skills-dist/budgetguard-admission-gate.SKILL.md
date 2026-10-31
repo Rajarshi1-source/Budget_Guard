@@ -485,6 +485,16 @@ trip, `replay`), `lanes.py`, `gather.py`, `briefs.py` (template), `workers/gate_
 | History | query 4.7 with the leak rule (`finished_at + 60 min <= decided_at`); the §D table reproduces from 30 fixture rows (integration test) |
 | Change failure | `workers/deploy_events.py`: page incident in the window AND `self_bad / bad >= self_page_share`; the window's self-inflicted cost equals `100 * budget_spent(burn, 1 h)` |
 
+### As built in W8 (31 Oct 2026)
+
+| Point | Rule |
+| --- | --- |
+| Reconcilers | four checks every 5 min: redeliver, bypass, **environment** (App rule present and enabled, `can_admins_bypass` false) and **cluster** (Rollout stamps vs live image vs admitted commits); gauges `bg_gate_config_drift`, `bg_cluster_digest_drift`, `bg_reconciler_last_success_timestamp_seconds` page or ticket through generated platform alerts |
+| Buffered callback | with PostgreSQL down, the callback outcome is queued behind the record in `bg:records-pending`; the replay applies record then outcome (the chaos drill found replayed rows stuck at `pending`) |
+| Blank secrets | a blank `*_NEXT` / `*_PREVIOUS` is unset; `_matches` never accepts an empty token; a blank required secret fails at boot |
+| Verdict latency | `bg_verdict_latency_seconds` measures enqueue (stream entry id) to recorded decision plus callback; logged per job as `latency_ms` |
+| Option A switch | `BG_HISTORY_SOURCE=raw` reads `increase()[30d]` per evaluation, only for `load/bench-ab.sh`; default `buckets` |
+
 ## 8. Tests to keep
 
 - Every row of the §3 worked example as a parametrized test.

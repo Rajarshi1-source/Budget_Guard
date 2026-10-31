@@ -7,6 +7,7 @@ dashboardImage:
   digest: ""
 grafanaImage: grafana/grafana:13.2.4  # .env.versions GRAFANA_TAG
 publicUrl: https://budgetguard.example.dev
+appsNamespace: bg-apps                # where the service Rollouts live (cluster drift reconciler)
 replicas: { api: 2, gateWorker: 2, snapshotter: 2, reconcilers: 1, deployRecorder: 1, briefWriter: 1, dashboard: 2 }
 # Secrets are created by deploy/k3s/bootstrap.sh from local values, never committed or templated here:
 #   budgetguard-platform  BG_* settings for the platform (DB URL as bg_app, Valkey URL with password, tokens, App key)

@@ -146,6 +146,15 @@ is being re-run, never that it was approved.
 
 ---
 
+As built in W8: `npm run e2e` runs four Playwright flows: the unknown card explains itself,
+recompute says "Same verdict", a short reason is refused in words, and the override form appears
+only on an overridable block. They run against `next start` plus `e2e/fake-api.mjs`. Better Auth
+validates its schema on the first `getSession()` even without a cookie, so a throwaway
+PostgreSQL with `platform/sql/006_auth.sql` must listen on 5434 (ci.yml starts one). Scope
+`getByRole("alert")` to `main`: Next renders an empty route-announcer alert. The override reason
+length is checked by the server action before the session; the textarea has no `minLength`, so
+the rule reaches the user in words.
+
 ## 7. Interview soundbites
 
 - "The dashboard explains decisions; it never makes them. If it is down, deploys are

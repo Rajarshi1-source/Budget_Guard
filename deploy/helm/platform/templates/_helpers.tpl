@@ -23,11 +23,17 @@ spec:
     metadata: { labels: { app: {{ .name }}, budgetguard/role: platform } }
     spec:
       {{- include "bg.podSecurity" .root | nindent 6 }}
+      {{- if .serviceAccount }}
+      serviceAccountName: {{ .serviceAccount }}
+      {{- end }}
+      automountServiceAccountToken: {{ if .serviceAccount }}true{{ else }}false{{ end }}   # only workers that call the API server
       containers:
         - name: {{ .name }}
           image: {{ include "bg.image" .root | quote }}
           args: {{ toJson .args }}
-          env: [{ name: BG_PUBLIC_URL, value: {{ .root.Values.publicUrl | quote }} }]
+          env:
+            - { name: BG_PUBLIC_URL, value: {{ .root.Values.publicUrl | quote }} }
+            - { name: BG_APPS_NAMESPACE, value: {{ .root.Values.appsNamespace | quote }} }
           envFrom: [{ secretRef: { name: {{ .root.Values.secrets.platform }} } }]
           {{- with .ports }}
           ports: {{ toJson . }}

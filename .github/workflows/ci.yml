@@ -49,6 +49,7 @@ jobs:
       - run: uv run bg generate ../slo -o ../rules/generated --check
       - run: uv run bg tests ../slo -o ../rules/tests/generated --check
       - run: uv run bg generate ../slo -o ../deploy/k3s/rules --format prometheus-operator --check
+      - run: uv run bg parity ../slo -o ../rules/parity --check
 
   integration:
     runs-on: ubuntu-24.04
@@ -114,7 +115,7 @@ jobs:
 
   dashboard:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: dashboard
@@ -133,6 +134,16 @@ jobs:
         env:
           BETTER_AUTH_SECRET: ci-build-only-placeholder-value-not-a-secret
           NEXT_TELEMETRY_DISABLED: "1"
+      - name: Auth database for the e2e flows (Better Auth validates its schema on first use)
+        run: |
+          TAG=$(sed -n 's/^TIMESCALE_TAG=\([^ #]*\).*/\1/p' ../deploy/compose/.env.versions)
+          docker run -d --name authdb -p 5434:5432 -e POSTGRES_PASSWORD=e2e "timescale/timescaledb:$TAG"
+          for _ in $(seq 60); do docker exec authdb pg_isready -U postgres -h 127.0.0.1 && break; sleep 2; done
+          { echo "CREATE SCHEMA auth; SET search_path = auth;"; cat ../platform/sql/006_auth.sql; } \
+            | docker exec -i authdb psql -q -U postgres -v ON_ERROR_STOP=1
+      - run: npx playwright install --with-deps chromium
+      - name: Playwright flows (unknown card, recompute, short reason, override visibility)
+        run: npm run e2e
 
   rules:
     runs-on: ubuntu-24.04
@@ -147,6 +158,19 @@ jobs:
             -c 'promtool check rules generated/*.yaml'
           docker run --rm -v "$PWD/rules:/rules" -w /rules/tests --entrypoint sh "prom/prometheus:$TAG" \
             -c 'promtool test rules *.test.yaml generated/*.test.yaml'
+      - name: Sloth parity (D-8) - regenerate Sloth's rules, fail on drift, compare in promtool
+        env:
+          SLOTH: ghcr.io/slok/sloth:v0.16.0@sha256:f0f0075b0d45c1cf684e92947508cc1d5bf573925f785f803a439b2306c8b9a5
+        run: |
+          TAG=$(sed -n 's/^PROMETHEUS_TAG=\([^ #]*\).*/\1/p' deploy/compose/.env.versions)
+          for f in rules/parity/*.sloth.yaml; do
+            svc=$(basename "$f" .sloth.yaml)
+            docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/rules/parity:/p" "$SLOTH" \
+              generate -i "/p/$svc.sloth.yaml" -o "/p/$svc.sloth.rules.yaml"
+          done
+          git diff --exit-code -- rules/parity
+          docker run --rm -v "$PWD/rules:/rules" -w /rules/parity --entrypoint sh "prom/prometheus:$TAG" \
+            -c 'promtool check rules *.sloth.rules.yaml && promtool test rules *.parity.test.yaml'
 
   secrets:
     runs-on: ubuntu-24.04

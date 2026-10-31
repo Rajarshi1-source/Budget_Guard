@@ -26,8 +26,9 @@ def _bearer(authorization: str | None) -> str:
 
 def _matches(token: str, *secrets: SecretStr | None) -> bool:
     """Constant-time compare against the current secret and, during a rotation, the next one."""
-    return any(s is not None and hmac.compare_digest(token.encode(), s.get_secret_value().encode())
-               for s in secrets)
+    return bool(token) and any(s is not None and s.get_secret_value()
+                               and hmac.compare_digest(token.encode(), s.get_secret_value().encode())
+                               for s in secrets)
 
 
 def require_dashboard(authorization: str | None = Header(default=None)) -> None:

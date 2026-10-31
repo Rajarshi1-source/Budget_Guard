@@ -14,4 +14,6 @@ canary:
     maxRatio: 2                     # canary self-burn may be at most 2x stable
     minRequestsPerMinute: 30
 internalHost: ""                    # per service: values-<service>.yaml
+release:
+  sha: ""                           # set by deploy.yml: the commit the gate admitted (drift reconciler)
 env: {}

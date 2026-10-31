@@ -30,10 +30,15 @@ x-platform: &platform
   environment: &platform-env
     BG_DATABASE_URL: "postgresql+asyncpg://bg_app:${BG_DB_APP_PASSWORD:?make secrets}@timescaledb:5432/budgetguard"
     BG_VALKEY_URL: "redis://:${VALKEY_PASSWORD:?make secrets}@valkey:6379/0"
-    BG_PROMETHEUS_URL: http://prometheus:9090
+    BG_PROMETHEUS_URL: "${BG_PROMETHEUS_URL:-http://prometheus:9090}"   # load/bench-ab.sh may use bg-bench-prom
+    BG_HISTORY_SOURCE: "${BG_HISTORY_SOURCE:-buckets}"   # raw = option A, only for load/bench-ab.sh (W8.7)
     BG_ALERTMANAGER_TOKEN: "${BG_ALERTMANAGER_TOKEN:?make secrets}"
     BG_DASHBOARD_TOKEN: "${BG_DASHBOARD_TOKEN:?make secrets}"
     BG_GITHUB_WEBHOOK_SECRET: "${BG_GITHUB_WEBHOOK_SECRET:?make secrets}"
+    # Rotation slots (docs/runbooks/secret-rotation.md): empty means unset, never "matches empty".
+    BG_ALERTMANAGER_TOKEN_NEXT: "${BG_ALERTMANAGER_TOKEN_NEXT:-}"
+    BG_DASHBOARD_TOKEN_NEXT: "${BG_DASHBOARD_TOKEN_NEXT:-}"
+    BG_GITHUB_WEBHOOK_SECRET_PREVIOUS: "${BG_GITHUB_WEBHOOK_SECRET_PREVIOUS:-}"
     # Placeholders until the GitHub App exists (W5): the platform boots, the webhook rejects everything.
     BG_GITHUB_REPO: "${BG_GITHUB_REPO:-Rajarshi1-source/Budget_Guard}"
     BG_GITHUB_REPO_ID: "${BG_GITHUB_REPO_ID:-0}"
@@ -71,6 +76,11 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=35d          # a 30-day SLO needs more than the 15d default (B-10)
       - --web.enable-lifecycle
+      # Query limits (security #15): anonymous Grafana viewers can send any PromQL. 30 M samples
+      # still fits the largest rule (30 d of 15 s samples = 172,800 per series, so ~170 series).
+      - --query.timeout=30s
+      - --query.max-concurrency=10
+      - --query.max-samples=30000000
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ../../rules/generated:/etc/prometheus/rules:ro
@@ -143,7 +153,7 @@ services:
 
   gate-worker:                                     # W5: consumes bg:gate-evaluations (group gate-workers)
     <<: *platform
-    command: ["python", "-m", "budgetguard.workers.gate_worker"]
+    command: ["python", "-m", "budgetguard.workers.gate_worker", "--metrics-port", "9466"]
     deploy: { replicas: 2 }                        # XAUTOCLAIM adopts a killed worker's jobs after 60 s
 
   deploy-recorder:                                 # W6: bg:deploy-events -> deployments, change-failure timer
@@ -157,7 +167,7 @@ services:
   reconcilers:                                     # needs a real GitHub App: docker compose --profile github
     <<: *platform
     profiles: ["github"]
-    command: ["python", "-m", "budgetguard.workers.reconcilers"]
+    command: ["python", "-m", "budgetguard.workers.reconcilers", "--metrics-port", "9465"]
 
   grafana:
     image: grafana/grafana:${GRAFANA_TAG:?set in .env.versions}

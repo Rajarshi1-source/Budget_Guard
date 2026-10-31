@@ -39,3 +39,7 @@ deploy/compose/secrets/
 
 # TypeScript incremental build cache
 *.tsbuildinfo
+
+# Playwright output
+test-results/
+playwright-report/

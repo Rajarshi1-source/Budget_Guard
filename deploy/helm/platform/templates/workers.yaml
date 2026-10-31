@@ -1,13 +1,17 @@
 {{ include "bg.worker" (dict "root" . "name" "gate-worker" "replicas" .Values.replicas.gateWorker
-     "args" (list "python" "-m" "budgetguard.workers.gate_worker")) }}
+     "args" (list "python" "-m" "budgetguard.workers.gate_worker" "--metrics-port" "9466")
+     "ports" (list (dict "name" "metrics" "containerPort" 9466))) }}
 ---
 {{/* Two replicas: one holds pg_try_advisory_lock(724001), the other waits (no Lease, no RBAC). */}}
 {{ include "bg.worker" (dict "root" . "name" "snapshotter" "replicas" .Values.replicas.snapshotter
      "args" (list "python" "-m" "budgetguard.workers.snapshotter" "--metrics-port" "9464")
      "ports" (list (dict "name" "metrics" "containerPort" 9464))) }}
 ---
+{{/* Redelivery, admin bypass, environment drift and cluster digest drift (W5.9, W8.5). The only
+     worker with a service-account token: it lists Rollouts in bg-apps (rbac.yaml). */}}
 {{ include "bg.worker" (dict "root" . "name" "reconcilers" "replicas" .Values.replicas.reconcilers
-     "args" (list "python" "-m" "budgetguard.workers.reconcilers")) }}
+     "args" (list "python" "-m" "budgetguard.workers.reconcilers" "--metrics-port" "9465")
+     "ports" (list (dict "name" "metrics" "containerPort" 9465)) "serviceAccount" "reconcilers") }}
 ---
 {{/* deployment_status -> deployments rows; settles change failures 60 min after each deploy (W6.3). */}}
 {{ include "bg.worker" (dict "root" . "name" "deploy-recorder" "replicas" .Values.replicas.deployRecorder

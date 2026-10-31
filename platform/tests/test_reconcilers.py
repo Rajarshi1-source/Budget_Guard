@@ -111,3 +111,109 @@ async def test_github_client_uses_the_app_jwt_and_a_read_only_token() -> None:
     assert ("GET", "/repos/ricky/budgetguard/deployments", "Bearer ghs_scoped") in seen
     with pytest.raises(AssertionError):
         assert ("GET", "/repos/ricky/budgetguard/deployments", "Bearer app.jwt") in seen
+
+
+# ------------------------------------------------------------------ W8.5: environment and cluster drift
+APP_ID = "424242"
+OUR_RULE = {"id": 1, "enabled": True, "app": {"id": 424242, "slug": "budgetguard"}}
+
+
+@pytest.mark.parametrize(("env", "rules", "reasons"), [
+    ({"can_admins_bypass": False}, [OUR_RULE], []),
+    (None, [], ["environment_missing"]),
+    ({"can_admins_bypass": True}, [OUR_RULE], ["admin_bypass_enabled"]),
+    ({}, [OUR_RULE], ["admin_bypass_enabled"]),                      # GitHub's default is True
+    ({"can_admins_bypass": False}, [{**OUR_RULE, "app": {"id": 7}}], ["protection_rule_missing"]),
+    ({"can_admins_bypass": False}, [{**OUR_RULE, "enabled": False}], ["protection_rule_disabled"]),
+    ({"can_admins_bypass": True}, [], ["admin_bypass_enabled", "protection_rule_missing"]),
+])
+def test_environment_drift_names_every_gap(env: dict[str, Any] | None, rules: list[dict[str, Any]],
+                                           reasons: list[str]) -> None:
+    assert rc.environment_drift(env, rules, APP_ID) == reasons
+
+
+def rollout(name: str, image_digest: str, stamped: str | None, sha: str | None) -> dict[str, Any]:
+    ann = {k: v for k, v in ((rc.DIGEST_ANNOTATION, stamped), (rc.SHA_ANNOTATION, sha)) if v}
+    return {"metadata": {"name": name},
+            "spec": {"template": {"metadata": {"annotations": ann},
+                                  "spec": {"containers": [
+                                      {"name": "app", "image": f"ns/{name}@{image_digest}"}]}}}}
+
+
+D1, D2 = "sha256:" + "1" * 64, "sha256:" + "2" * 64
+
+
+@pytest.mark.parametrize(("ro", "admitted", "reason"), [
+    (rollout("orders-service", D1, D1, "a" * 40), {"a" * 40}, None),
+    (rollout("orders-service", D2, D1, "a" * 40), {"a" * 40}, "image_changed"),      # kubectl set image
+    (rollout("orders-service", D1, D1, "b" * 40), {"a" * 40}, "sha_not_admitted"),   # hand-run helm upgrade
+    (rollout("orders-service", D1, None, None), set(), "unannotated"),
+])
+def test_rollout_drift(ro: dict[str, Any], admitted: set[str], reason: str | None) -> None:
+    found = rc.rollout_drift(ro, admitted)
+    assert (found.reason if found else None) == reason
+
+
+class DriftLedger(FakeLedger):
+    def __init__(self, admitted: dict[str, set[str]]) -> None:
+        super().__init__()
+        self.admitted, self.recorded = admitted, []
+
+    async def admitted_shas(self, service: str, shas: list[str]) -> set[str]:
+        return self.admitted.get(service, set()) & set(shas)
+
+    async def record_drift(self, finding: rc.DigestDrift, policy_version: str) -> bool:
+        first = finding not in self.recorded
+        self.recorded.append(finding)
+        return first
+
+
+class FakeKube:
+    def __init__(self, items: list[dict[str, Any]]) -> None:
+        self.items = items
+
+    async def rollouts(self) -> list[dict[str, Any]]:
+        return self.items
+
+
+async def test_cluster_check_records_only_the_drifted_rollout() -> None:
+    ledger = DriftLedger({"orders-service": {"a" * 40}, "auth-service": {"c" * 40}})
+    kube = FakeKube([rollout("orders-service", D1, D1, "a" * 40), rollout("auth-service", D2, D1, "c" * 40)])
+    found = await rc.check_cluster(kube, ledger, "v1")  # type: ignore[arg-type]
+    assert [(f.service, f.reason) for f in found] == [("auth-service", "image_changed")]
+    assert ledger.recorded[0].live_digest == D2 and ledger.recorded[0].annotated_digest == D1
+    rc._publish_cluster(found, ["auth-service", "orders-service"])
+    assert rc.DIGEST_DRIFT.labels("auth-service")._value.get() == 1
+    assert rc.DIGEST_DRIFT.labels("orders-service")._value.get() == 0
+
+
+async def test_environment_check_uses_a_read_only_token_and_treats_404_as_missing() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith("/access_tokens"):
+            assert json.loads(request.content)["permissions"] == {"actions": "read"}
+            return httpx.Response(201, json={"token": "ghs_scoped"})
+        assert request.headers["Authorization"] == "Bearer ghs_scoped"
+        if "production-auth-service" in request.url.path:
+            return httpx.Response(404, json={"message": "Not Found"})
+        if request.url.path.endswith("/deployment_protection_rules"):
+            return httpx.Response(200, json={"total_count": 1, "custom_deployment_protection_rules": [
+                {"id": 3, "enabled": True, "app": {"id": int(get_settings().github_app_id)}}]})
+        return httpx.Response(200, json={"name": "production-orders-service", "can_admins_bypass": False})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        gh = rc.GitHub(http, get_settings(), jwt=lambda: "app.jwt")
+        found = await rc.check_environments(gh, ["auth-service", "orders-service"],
+                                            get_settings().github_app_id)
+    assert found == {"auth-service": ["environment_missing"], "orders-service": []}
+    rules = "/repos/ricky/budgetguard/environments/production-orders-service/deployment_protection_rules"
+    assert ("GET", rules) in seen
+    rc._publish_environments(found)
+    assert rc.CONFIG_DRIFT.labels("auth-service", "environment_missing")._value.get() == 1
+
+
+def test_kube_client_is_off_outside_a_cluster(tmp_path: Any) -> None:
+    assert rc.Kube.in_cluster("bg-apps", sa_dir=tmp_path) is None

@@ -2,7 +2,10 @@
 
 1. every third-party action is pinned to a full commit SHA (a moved tag cannot change what runs);
 2. only a job with `environment:` may reference secrets.KUBECONFIG (an environment secret is not
-   readable without the environment, but a repo secret of the same name would be: catch the slip).
+   readable without the environment, but a repo secret of the same name would be: catch the slip);
+3. no `${{ }}` expression inside a `run:` script (W8.5): GitHub pastes the value into the script
+   before the shell parses it, so a branch name or decision field becomes code. Pass values
+   through `env:` and quote them.
 
     uv run --project platform python scripts/lint_workflows.py
 """
@@ -26,6 +29,9 @@ def problems(path: Path) -> list[str]:
             uses = step.get("uses")
             if uses and not uses.startswith("./") and not SHA.match(uses):
                 out.append(f"{path.name}:{job_name}: action not pinned by commit SHA: {uses}")
+            if "${{" in str(step.get("run") or ""):
+                name = step.get("name", "unnamed step")
+                out.append(f"{path.name}:{job_name}: expression inside run: ({name}); pass it through env:")
         if "secrets.KUBECONFIG" in yaml.safe_dump(job) and "environment" not in job:
             out.append(f"{path.name}:{job_name}: references secrets.KUBECONFIG without an environment")
     return out

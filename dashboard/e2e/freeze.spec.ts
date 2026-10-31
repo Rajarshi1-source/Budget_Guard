@@ -1,25 +1,32 @@
-// Runs against `next start` with BUDGETGUARD_API pointing at e2e/fake-api.mjs (fixtures from the
-// platform's OpenAPI examples). Not executed in the skill-authoring session; run it in CI.
+// The four D-8 dashboard flows (plan W8.4), against `next start` and e2e/fake-api.mjs.
 import { expect, test } from "@playwright/test";
 
 test("an unknown service says why, in words", async ({ page }) => {
   await page.goto("/");
   const card = page.getByRole("article", { name: "inventory-service" });
   await expect(card.getByText("Unknown — no trustworthy signal")).toBeVisible();
-  await expect(card.getByText("No metrics at all")).toBeVisible();
+  await expect(card.getByText(/No metrics at all/)).toBeVisible();
+  await expect(card.getByText("—").first()).toBeVisible();          // no number invented for missing data
 });
 
-test("a blocked decision shows price vs affordable and replays identically", async ({ page }) => {
+test("recompute from stored inputs says Same verdict", async ({ page }) => {
   await page.goto("/decisions/4812");
-  await expect(page.getByText("block")).toBeVisible();
+  await expect(page.getByText("ACTIVE_PAGE")).toBeVisible();
   await page.getByRole("button", { name: "Recompute from stored inputs" }).click();
-  await expect(page.getByRole("status")).toContainText("Same verdict");
+  await expect(page.getByRole("status")).toContainText("Same verdict (block, ACTIVE_PAGE)");
 });
 
-test("override needs a signed-in approver and a 20-character reason", async ({ page }) => {
+test("a short override reason is refused with the rule in words", async ({ page }) => {
   await page.goto("/decisions/4812");
-  await expect(page.getByRole("button", { name: "Override and re-run" })).toBeVisible();
   await page.getByLabel("Reason (at least 20 characters)").fill("too short");
   await page.getByRole("button", { name: "Override and re-run" }).click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  // scoped to main: Next.js renders its own (empty) route-announcer alert outside it
+  await expect(page.getByRole("main").getByRole("alert")).toContainText("at least 20 characters");
+});
+
+test("the override form appears only on an overridable block", async ({ page }) => {
+  await page.goto("/decisions/4813");
+  await expect(page.getByText("WITHIN_BUDGET")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Recompute from stored inputs" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Override and re-run" })).toHaveCount(0);
 });

@@ -4,8 +4,11 @@ timeout, breaker), history from TimescaleDB, concurrently.
 One GateInput covers every SLO of the service:
   integrity        the worst across the SLOs (no_data > stale > low_traffic > ok)
   remaining_*_pct  the most constrained SLO; buckets first, the increase30d rule as the fallback
-                   (Rev 2 §11.2). remaining_self uses self_bad where the SLI has an origin label
-                   and all bad events where it does not (latency): no attribution data = self.
+                   (Rev 2 §11.2, option C with B). source="raw" asks Prometheus for increase()
+                   over 30 d on every evaluation instead (option A): same numbers, kept only to
+                   measure the scaling decision (W8.7, load/merge-storm.js). remaining_self
+                   uses self_bad where the SLI has an origin label and all bad events where it
+                   does not (latency): no attribution data = self.
   page_firing      any SLO's page alert; self_share_1h is the largest self share among the paging
                    SLOs, 1.0 for an SLI without origin labels, so a latency page is never waved
                    through as "someone else's".
@@ -15,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -80,6 +84,23 @@ async def bucket_windows(engine: AsyncEngine, service: str,
     return {r.slo: (r.total, r.bad, r.self_bad) for r in rows}
 
 
+async def raw_windows(prom: PrometheusClient, sl: ServiceLevel) -> dict[str, tuple[float, float, float]]:
+    """Option A: 30-day totals straight from the raw counters (172,800 samples per series)."""
+    out = {}
+    for slo in sl.spec.slos:
+        w = f"[{sl.spec.window}]"
+        total = await prom.scalar(f"sum(increase({slo.sli.total}{w}))")
+        if slo.sli.type == "ratio":
+            bad = await prom.scalar(f"sum(increase({slo.sli.bad}{w}))")
+        else:
+            good = await prom.scalar(f"sum(increase({slo.sli.good}{w}))")
+            bad = None if total is None or good is None else max(total - good, 0.0)
+        own = await prom.scalar(f"sum(increase({slo.sli.self_bad}{w}))") if slo.sli.self_bad else bad
+        if total is not None and bad is not None:
+            out[slo.name] = (total, bad, bad if own is None else own)
+    return out
+
+
 async def history(engine: AsyncEngine, service: str, now: datetime) -> History:
     async with engine.connect() as c:
         r = (await c.execute(HISTORY, {"service": service, "since": now - timedelta(days=180),
@@ -123,12 +144,17 @@ def combine(sl: ServiceLevel, statuses: dict[str, SloStatus],
 
 
 async def gather_signals(prom: PrometheusClient, engine: AsyncEngine | None, sl: ServiceLevel,
-                         now: datetime) -> Signals:
+                         now: datetime, source: Literal["buckets", "raw"] = "buckets") -> Signals:
     """Prometheus and TimescaleDB concurrently. A database outage falls back to the rule; a
     Prometheus outage makes every SLO STALE inside slo_status (never healthy)."""
     service = sl.metadata.service
 
     async def windows() -> dict[str, tuple[float, float, float]] | None:
+        if source == "raw":
+            try:
+                return await raw_windows(prom, sl)
+            except PrometheusUnavailable:
+                return None
         if engine is None:
             return None
         try:

@@ -40,3 +40,9 @@ scrape_configs:
     static_configs: [{targets: ["platform-api:8000"]}]
   - job_name: snapshotter
     dns_sd_configs: [{names: [snapshotter], type: A, port: 9464}]   # one target per replica
+  # Gate workers (W8.7): bg_verdict_latency_seconds, the latency half of the meta-SLO.
+  - job_name: gate-worker
+    dns_sd_configs: [{names: [gate-worker], type: A, port: 9466}]
+  # Reconcilers (W8.5, `--profile github` only): drift gauges for GateConfigDrift / ClusterDigestDrift.
+  - job_name: reconcilers
+    dns_sd_configs: [{names: [reconcilers], type: A, port: 9465}]   # no target when the profile is off

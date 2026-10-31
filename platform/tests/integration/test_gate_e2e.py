@@ -247,8 +247,8 @@ async def test_postgres_down_buffers_and_replays(engine: AsyncEngine, valkey: Re
     out = await gw.evaluate_job(context(dead, valkey, posts), job("e" * 40, run_id, dep_id))
     await dead.dispose()
     assert out.status == "buffered" and len(posts) == 1
-    assert await gw.replay_pending(context(engine, valkey, [])) == 1
+    assert await gw.replay_pending(context(engine, valkey, [])) == 2        # the record, then its callback
     async with engine.connect() as c:
-        n = (await c.execute(text("SELECT count(*) FROM decisions WHERE github_deployment_id = :d"),
-                             {"d": dep_id})).scalar_one()
-    assert n == 1 and await valkey.xlen(gw.PENDING) == 0
+        rows = (await c.execute(text("SELECT callback_state FROM decisions WHERE github_deployment_id = :d"),
+                                {"d": dep_id})).all()
+    assert [r.callback_state for r in rows] == ["sent"] and await valkey.xlen(gw.PENDING) == 0
