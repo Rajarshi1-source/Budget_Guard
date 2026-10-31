@@ -1,0 +1,37 @@
+# The gate must answer during its own deploy: never fewer than the desired replicas (maxUnavailable 0).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: platform-api, labels: { app: platform-api } }
+spec:
+  replicas: {{ .Values.replicas.api }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector: { matchLabels: { app: platform-api } }
+  template:
+    metadata: { labels: { app: platform-api, budgetguard/role: platform } }
+    spec:
+      {{- include "bg.podSecurity" . | nindent 6 }}
+      containers:
+        - name: api
+          image: {{ include "bg.image" . | quote }}
+          args: ["uvicorn", "budgetguard.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          env: [{ name: BG_PUBLIC_URL, value: {{ .Values.publicUrl | quote }} }]
+          envFrom: [{ secretRef: { name: {{ .Values.secrets.platform }} } }]
+          ports: [{ name: http, containerPort: 8000 }]
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5 }   # PostgreSQL + Valkey
+          livenessProbe: { httpGet: { path: /livez, port: http }, periodSeconds: 10 }    # event loop only
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 512Mi } }
+          {{- include "bg.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: platform-api, labels: { app: platform-api } }
+spec:
+  selector: { app: platform-api }
+  ports: [{ name: http, port: 8000, targetPort: http }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: platform-api }
+spec: { minAvailable: 1, selector: { matchLabels: { app: platform-api } } }

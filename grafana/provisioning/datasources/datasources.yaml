@@ -7,7 +7,7 @@ datasources:
     uid: prometheus
     type: prometheus
     access: proxy
-    url: http://prometheus:9090
+    url: ${BG_PROMETHEUS_URL}           # compose: http://prometheus:9090; k3s: kube-prometheus-stack
     isDefault: true
     editable: false
     jsonData: { timeInterval: 15s }
@@ -15,7 +15,7 @@ datasources:
     uid: timescaledb
     type: grafana-postgresql-datasource
     access: proxy
-    url: timescaledb:5432
+    url: ${BG_TSDB_HOST}                # compose: timescaledb:5432; k3s: timescaledb.data:5432
     user: bg_grafana
     editable: false
     jsonData:

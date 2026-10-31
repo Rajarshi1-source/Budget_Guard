@@ -1,0 +1,6 @@
+# orders-service: merged over values.yaml by deploy.yml (-f deploy/helm/service/values-orders-service.yaml)
+internalHost: orders.bg-apps.internal
+env:                                # dependencies through Traefik's internal entrypoint, so canary weights
+  BG_AUTH_URL: http://auth.bg-apps.internal                 # apply to service-to-service traffic too
+  BG_INVENTORY_URL: http://inventory.bg-apps.internal
+  BG_NOTIFICATIONS_URL: http://notifications.bg-apps.internal

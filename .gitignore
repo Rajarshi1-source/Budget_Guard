@@ -36,3 +36,6 @@ Thumbs.db
 
 # compose secrets (copied from deploy/compose/secrets.example by make secrets)
 deploy/compose/secrets/
+
+# TypeScript incremental build cache
+*.tsbuildinfo

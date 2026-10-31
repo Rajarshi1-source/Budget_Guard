@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Values.service }}
+  labels: { release: kube-prometheus-stack }
+spec:
+  jobLabel: app                                   # job="<service>", as the generated up{job=…} rules expect
+  selector:
+    matchLabels: { app: {{ .Values.service }} }
+  podTargetLabels: [rollouts-pod-template-hash]   # becomes rollouts_pod_template_hash
+  podMetricsEndpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s

@@ -1,0 +1,42 @@
+# kube-prometheus-stack 92.10.1 values (bootstrap.sh). Alertmanager tree = budgetguard-slo-rules §5.
+prometheus:
+  prometheusSpec:
+    retention: 35d                       # a 30-day SLO needs more than the default
+    retentionSize: 8GB
+    scrapeInterval: 15s
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources: { requests: { memory: 768Mi }, limits: { memory: 1280Mi } }
+    storageSpec:
+      volumeClaimTemplate:
+        spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 15Gi } } }
+alertmanager:
+  alertmanagerSpec:
+    secrets: [budgetguard-am]            # slack URLs + bearer token, mounted under /etc/alertmanager/secrets/
+  config:                                # same tree as budgetguard-slo-rules §5 (compose)
+    route:
+      receiver: slack-tickets
+      group_by: [service, slo, severity]
+      routes:
+        - { matchers: ['alertname="Watchdog"'], receiver: heartbeat }   # point at an external dead man's switch
+        - { matchers: ['severity="page"'], receiver: page, continue: true }
+        - { matchers: ['severity="page"'], receiver: budgetguard }
+        - { matchers: ['severity="ticket"'], receiver: budgetguard, continue: true }
+        - { matchers: ['severity="ticket"'], receiver: slack-tickets }   # root receiver only catches unmatched alerts
+    receivers:
+      - name: heartbeat
+      - name: page
+        slack_configs: [{ api_url_file: /etc/alertmanager/secrets/budgetguard-am/slack_page_url, channel: "#bg-page", send_resolved: true }]
+      - name: slack-tickets
+        slack_configs: [{ api_url_file: /etc/alertmanager/secrets/budgetguard-am/slack_ticket_url, channel: "#bg-tickets", send_resolved: true }]
+      - name: budgetguard
+        webhook_configs:
+          - url: http://platform-api.bg-platform:8000/v1/webhooks/alertmanager
+            send_resolved: true
+            http_config: { authorization: { credentials_file: /etc/alertmanager/secrets/budgetguard-am/bg_token } }
+    inhibit_rules:
+      - source_matchers: ['severity="page"']
+        target_matchers: ['severity="ticket"']
+        equal: [service, slo]
+grafana:
+  enabled: false                         # Grafana runs from the platform chart with provisioned JSON

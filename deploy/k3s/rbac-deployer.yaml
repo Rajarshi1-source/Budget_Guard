@@ -1,0 +1,42 @@
+# What the KUBECONFIG environment secret can do: nothing outside bg-apps, and no NetworkPolicies,
+# Roles or namespaces anywhere (security-and-api.md T-3; delivery skill flag 9).
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: deployer, namespace: bg-apps }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: deployer-token
+  namespace: bg-apps
+  annotations: { kubernetes.io/service-account.name: deployer }
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: deployer, namespace: bg-apps }
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [rollouts, rollouts/status, analysistemplates, analysisruns, experiments]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [traefik.io]
+    resources: [traefikservices, ingressroutes]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [""]
+    resources: [services, configmaps, secrets]       # secrets: Helm 4 stores release state there
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [monitoring.coreos.com]
+    resources: [podmonitors]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: ["", apps]
+    resources: [pods, replicasets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: deployer, namespace: bg-apps }
+subjects: [{ kind: ServiceAccount, name: deployer, namespace: bg-apps }]
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: deployer }

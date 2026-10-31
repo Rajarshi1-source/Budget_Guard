@@ -1,0 +1,20 @@
+# Images are deployed by digest (build-push.yml signs them; the bootstrap verifies before install).
+image:
+  repository: ""                      # <DOCKERHUB_NS>/platform
+  digest: ""
+dashboardImage:
+  repository: ""                      # <DOCKERHUB_NS>/dashboard
+  digest: ""
+grafanaImage: grafana/grafana:13.2.4  # .env.versions GRAFANA_TAG
+publicUrl: https://budgetguard.example.dev
+replicas: { api: 2, gateWorker: 2, snapshotter: 2, reconcilers: 1, dashboard: 2 }
+# Secrets are created by deploy/k3s/bootstrap.sh from local values, never committed or templated here:
+#   budgetguard-platform  BG_* settings for the platform (DB URL as bg_app, Valkey URL with password, tokens, App key)
+#   budgetguard-migrate   BG_DATABASE_URL as bg_migrator, BG_DB_*_PASSWORD
+#   budgetguard-dashboard BUDGETGUARD_DASHBOARD_TOKEN, AUTH_DATABASE_URL (bg_auth), BETTER_AUTH_SECRET, GITHUB_CLIENT_*
+#   budgetguard-grafana   BG_DB_GRAFANA_PASSWORD, GF_SECURITY_ADMIN_PASSWORD
+secrets:
+  platform: budgetguard-platform
+  migrate: budgetguard-migrate
+  dashboard: budgetguard-dashboard
+  grafana: budgetguard-grafana

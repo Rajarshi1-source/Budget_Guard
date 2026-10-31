@@ -60,6 +60,12 @@ def rolling_daily(objective: float, daily: Sequence[tuple[date, float, float]],
     return out
 
 
+def gate_remaining(slo: Slo, w: Window | None, attribution: str) -> float | None:
+    """The budget number the gate decides on: self-inflicted under charge_origin when the SLI has an
+    origin label (D-3), all bad events otherwise. Cards freeze on this, so they agree with the gate."""
+    return remaining(slo.objective, w, self_only=attribution == "charge_origin" and bool(slo.sli.self_bad))
+
+
 def _freeze_reasons(sl: ServiceLevel, slo: Slo, st: SloStatus, rem: float | None) -> tuple[bool, bool]:
     """(frozen by an alert, frozen by budget) for one SLO, per the spec's gate block."""
     hard = sl.spec.gate.hard_stop_on
@@ -70,7 +76,8 @@ def _freeze_reasons(sl: ServiceLevel, slo: Slo, st: SloStatus, rem: float | None
 
 def service_card(sl: ServiceLevel, inputs: dict[str, SloInputs], *, now: datetime,
                  open_incident: dict[str, Any] | None,
-                 last_decision: dict[str, Any] | None) -> dict[str, Any]:
+                 last_decision: dict[str, Any] | None,
+                 attribution: str = "charge_origin") -> dict[str, Any]:
     states, integrities, etas = [], [], []
     alert_frozen = budget_frozen = False
     for slo in sl.spec.slos:
@@ -81,7 +88,8 @@ def service_card(sl: ServiceLevel, inputs: dict[str, SloInputs], *, now: datetim
         integrities.append(i.status.integrity)
         states.append(sli_state(i.status.integrity, rem, i.status.page_firing, i.status.ticket_firing,
                                 sl.spec.gate.reserve_pct))
-        by_alert, by_budget = _freeze_reasons(sl, slo, i.status, rem)
+        gate_rem = gate_remaining(slo, i.window, attribution)
+        by_alert, by_budget = _freeze_reasons(sl, slo, i.status, rem if gate_rem is None else gate_rem)
         alert_frozen |= by_alert
         if by_budget:
             budget_frozen = True

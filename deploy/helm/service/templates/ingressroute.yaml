@@ -1,0 +1,12 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ .Values.service }}-internal
+spec:
+  entryPoints: [internal]                       # a ClusterIP-only Traefik entrypoint
+  routes:
+    - match: Host(`{{ required "internalHost is required" .Values.internalHost }}`)
+      kind: Rule
+      services:
+        - name: {{ .Values.service }}-weighted
+          kind: TraefikService

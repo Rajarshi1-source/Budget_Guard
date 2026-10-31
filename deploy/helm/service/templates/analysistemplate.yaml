@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: budget-burn-canary
+spec:
+  args:
+    - name: service
+    - name: canary-hash
+    - name: stable-hash
+  metrics:
+    - name: canary-has-traffic                  # D-4: no traffic is not a pass
+      initialDelay: 2m
+      interval: 1m
+      count: 5
+      failureLimit: 1
+      consecutiveErrorLimit: 3
+      successCondition: len(result) > 0 && result[0] >= {{ .Values.canary.analysis.minRequestsPerMinute }}
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring:9090
+          query: |
+            sum(rate(http_server_requests_seconds_count{service="{{"{{"}}args.service{{"}}"}}",rollouts_pod_template_hash="{{"{{"}}args.canary-hash{{"}}"}}"}[2m])) * 60
+    - name: canary-vs-stable-self-burn
+      initialDelay: 2m
+      interval: 1m
+      count: 10
+      failureLimit: 2
+      consecutiveErrorLimit: 3
+      successCondition: len(result) > 0 && result[0] <= {{ .Values.canary.analysis.maxRatio }}
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring:9090
+          query: |
+            (
+              (sum(rate(http_server_requests_seconds_count{service="{{"{{"}}args.service{{"}}"}}",rollouts_pod_template_hash="{{"{{"}}args.canary-hash{{"}}"}}",status=~"5..",error_origin="self"}[2m])) or vector(0))
+              / sum(rate(http_server_requests_seconds_count{service="{{"{{"}}args.service{{"}}"}}",rollouts_pod_template_hash="{{"{{"}}args.canary-hash{{"}}"}}"}[2m]))
+            )
+            /
+            clamp_min(
+              (sum(rate(http_server_requests_seconds_count{service="{{"{{"}}args.service{{"}}"}}",rollouts_pod_template_hash="{{"{{"}}args.stable-hash{{"}}"}}",status=~"5..",error_origin="self"}[2m])) or vector(0))
+              / sum(rate(http_server_requests_seconds_count{service="{{"{{"}}args.service{{"}}"}}",rollouts_pod_template_hash="{{"{{"}}args.stable-hash{{"}}"}}"}[2m])),
+              0.0005
+            )

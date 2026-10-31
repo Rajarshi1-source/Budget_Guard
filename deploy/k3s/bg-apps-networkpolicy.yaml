@@ -1,0 +1,17 @@
+# bg-apps (security-and-api.md change #16): the services under test accept traffic only from Traefik
+# (ingress and the internal entrypoint, so canary weights apply to service-to-service calls too),
+# and Prometheus scrapes; demo load (k6) goes through Traefik like any caller. Applied by bootstrap.sh, not by the deploy job:
+# the deployer Role cannot create or change NetworkPolicies, so a workflow edit cannot widen this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: services-under-test, namespace: bg-apps }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: traefik } }
+      ports: [{ port: 8080 }]
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }]
+      ports: [{ port: 8080 }]

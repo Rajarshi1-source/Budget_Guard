@@ -39,6 +39,8 @@ export async function overrideAction(_: OverrideState, form: FormData): Promise<
   } catch (e) {
     if (e instanceof ApiError && e.status === 403) return { error: "Your GitHub login is not on the approvers list" };
     if (e instanceof ApiError && e.status === 409) return { error: "Nothing to override: not blocked, already overridden, or too old to re-run" };
+    if (e instanceof ApiError && e.status === 401) return { error: "GitHub rejected your session token; sign in again" };
+    if (e instanceof ApiError && e.status === 503) return { error: "GitHub would not re-run the job, so the override was withdrawn; try again" };
     return { error: "Override failed; nothing was approved" };
   }
   refresh();                       // Next 16: re-read uncached data on this page

@@ -1,0 +1,9 @@
+apiVersion: traefik.io/v1alpha1
+kind: TraefikService
+metadata:
+  name: {{ .Values.service }}-weighted
+spec:
+  weighted:
+    services:
+      - { name: {{ .Values.service }}-stable, port: 80 }
+      - { name: {{ .Values.service }}-canary, port: 80 }

@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 import jwt
 from fastapi import APIRouter, Header, HTTPException, Request
+from redis.exceptions import ConnectionError as ValkeyDown
+from redis.exceptions import TimeoutError as ValkeyTimeout
 
 from ..config import settings
 from ..queue import enqueue_once
@@ -51,8 +53,10 @@ async def github_webhook(request: Request,
     payload = json.loads(body)
     if not ours(payload):
         return {"ignored": "repository"}
+    if x_github_event in ("deployment_status", "pull_request"):
+        return await _deploy_event(request, x_github_event, x_github_delivery, payload)
     if x_github_event != "deployment_protection_rule":
-        return {"ignored": x_github_event}               # deployment_status / pull_request routes: data layer
+        return {"ignored": x_github_event}
     m_env = ENV.match(payload.get("environment", ""))
     if m_env is None:
         return {"ignored": payload.get("environment")}
@@ -73,9 +77,66 @@ async def github_webhook(request: Request,
         validate_job(job)                                # same rule the worker applies after the queue
     except JobRejected as exc:                           # e.g. GitHub changed the callback URL shape:
         raise HTTPException(422, f"unexpected job: {exc}") from exc   # a failed, redeliverable delivery
-    accepted = await enqueue_once(request.app.state.valkey, "bg:gate-evaluations",
-                                  key=x_github_delivery, job=job)     # signature: budgetguard-data-layer §4
+    try:
+        accepted = await enqueue_once(request.app.state.valkey, "bg:gate-evaluations",
+                                      key=x_github_delivery, job=job)  # signature: budgetguard-data-layer §4
+    except (ValkeyDown, ValkeyTimeout, OSError):
+        return await _inline(request, job)               # Valkey down: decide now, Postgres dedupes
     return {"accepted": accepted}                        # 200 within ~1 s; work happens in the worker
+
+
+async def _inline(request: Request, job: dict[str, Any]) -> dict[str, Any]:
+    """Valkey unavailable (budgetguard-admission-gate §7): evaluate in the request, without the
+    single-flight lock or verdict cache; UNIQUE(github_delivery, github_deployment_id) dedupes.
+    Two callback attempts keep the answer inside GitHub's 10 s webhook timeout."""
+    from dataclasses import replace
+
+    from ..workers.gate_worker import evaluate_job
+    gate = getattr(request.app.state, "gate", None)
+    if gate is None:
+        raise HTTPException(503, "queue unavailable")    # GitHub marks the delivery failed; redeliverable
+    from ..db import DB_DOWN
+    try:
+        out = await evaluate_job(replace(gate, valkey=None, callback_attempts=2), job)
+    except DB_DOWN as exc:                               # nothing recorded or buffered: never answer
+        raise HTTPException(503, "cannot record a decision") from exc   # redelivery reconciler retries
+    return {"accepted": True, "inline": out.status}
+
+
+async def _deploy_event(request: Request, event: str, delivery: str,
+                        payload: dict[str, Any]) -> dict[str, Any]:
+    """deployment_status and merged pull_request events for the deploy recorder (W6.3): only the
+    identifiers it needs, never the full payload, onto bg:deploy-events."""
+    if event == "deployment_status":
+        m = ENV.match(payload.get("deployment", {}).get("environment", ""))
+        if m is None:
+            return {"ignored": payload.get("deployment", {}).get("environment")}
+        dep, st = payload["deployment"], payload["deployment_status"]
+        rec = {"event": event, "service": m.group(1), "deployment_id": dep["id"], "sha": dep["sha"],
+               "state": st["state"], "at": st.get("updated_at") or st.get("created_at"),
+               "run_id": _run_id(st.get("target_url") or st.get("log_url") or "")}
+    else:
+        pr = payload.get("pull_request", {})
+        if payload.get("action") != "closed" or not pr.get("merged"):
+            return {"ignored": f"pull_request {payload.get('action')}"}
+        rec = {"event": event, "number": pr["number"], "merge_commit_sha": pr.get("merge_commit_sha"),
+               "merged_at": pr.get("merged_at"), "created_at": pr.get("created_at"),
+               "base": pr.get("base", {}).get("ref")}
+    try:
+        accepted = await enqueue_once(request.app.state.valkey, "bg:deploy-events", key=delivery, job=rec)
+    except (ValkeyDown, ValkeyTimeout, OSError) as exc:
+        raise HTTPException(503, "queue unavailable") from exc   # redeliverable; the reconciler retries
+    return {"accepted": accepted}
+
+
+def _run_id(url: str) -> int | None:
+    m = re.search(r"/actions/runs/(\d+)", url)
+    return int(m.group(1)) if m else None
+
+
+class AppMisconfigured(RuntimeError):
+    """The App credentials cannot sign a JWT (missing or malformed key): permanent until an operator
+    fixes the secret, so callers record the failure instead of retrying."""
 
 
 class JobRejected(ValueError):
@@ -100,8 +161,11 @@ def validate_job(job: dict[str, Any]) -> None:
 
 def app_jwt() -> str:
     now = int(time.time())
-    return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": settings.github_app_id},
-                      settings.github_app_private_key.get_secret_value(), algorithm="RS256")
+    try:
+        return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": settings.github_app_id},
+                          settings.github_app_private_key.get_secret_value(), algorithm="RS256")
+    except (jwt.PyJWTError, ValueError, TypeError) as e:
+        raise AppMisconfigured(f"cannot sign the App JWT: {type(e).__name__}") from e
 
 
 async def installation_token(client: httpx.AsyncClient, installation_id: int,
@@ -128,3 +192,22 @@ async def post_review(client: httpx.AsyncClient, job: dict, approved: bool, comm
                                 "state": "approved" if approved else "rejected",
                                 "comment": comment[:1000]})
     r.raise_for_status()
+
+
+class GitHubApi:
+    """Read-only REST calls for one job (lane proofs). One installation token per instance, minted
+    lazily and down-scoped to contents: read on this repository."""
+
+    def __init__(self, client: httpx.AsyncClient, installation_id: int) -> None:
+        self.client, self.installation_id = client, installation_id
+        self._token: str | None = None
+
+    async def get(self, path: str) -> dict[str, Any]:
+        if self._token is None:
+            self._token = await installation_token(self.client, self.installation_id, {"contents": "read"})
+        r = await self.client.get(f"{API}{path}", timeout=5.0,
+                                  headers={"Authorization": f"Bearer {self._token}",
+                                           "Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        body: dict[str, Any] = r.json()
+        return body

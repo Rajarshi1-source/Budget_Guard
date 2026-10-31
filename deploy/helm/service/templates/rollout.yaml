@@ -1,0 +1,58 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ .Values.service }}
+  labels: { app: {{ .Values.service }} }
+spec:
+  replicas: {{ .Values.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app: {{ .Values.service }} }
+  template:
+    metadata:
+      labels: { app: {{ .Values.service }} }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: app
+          image: "{{ required "image.repository is required" .Values.image.repository }}@{{ required "image.digest is required" .Values.image.digest }}"
+          ports: [{ name: http, containerPort: {{ .Values.port }} }]
+          env:
+            - { name: SPRING_APPLICATION_NAME, value: {{ .Values.service | quote }} }
+            {{- range $k, $v := .Values.env }}
+            - { name: {{ $k }}, value: {{ $v | quote }} }
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+  strategy:
+    canary:
+      stableService: {{ .Values.service }}-stable
+      canaryService: {{ .Values.service }}-canary
+      trafficRouting:
+        traefik:
+          weightedTraefikServiceName: {{ .Values.service }}-weighted
+      analysis:                                   # background analysis for the whole rollout
+        startingStep: 1
+        templates: [{ templateName: budget-burn-canary }]
+        args:
+          - { name: service, value: {{ .Values.service | quote }} }
+          - name: canary-hash
+            valueFrom: { podTemplateHashValue: Latest }
+          - name: stable-hash
+            valueFrom: { podTemplateHashValue: Stable }
+      steps:
+        {{- range $w := .Values.canary.weights }}
+        - setWeight: {{ $w }}
+        {{- if lt (int $w) 100 }}
+        - pause: { duration: {{ $.Values.canary.bake }} }
+        {{- end }}
+        {{- end }}

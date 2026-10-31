@@ -1,0 +1,10 @@
+{{ include "bg.worker" (dict "root" . "name" "gate-worker" "replicas" .Values.replicas.gateWorker
+     "args" (list "python" "-m" "budgetguard.workers.gate_worker")) }}
+---
+{{/* Two replicas: one holds pg_try_advisory_lock(724001), the other waits (no Lease, no RBAC). */}}
+{{ include "bg.worker" (dict "root" . "name" "snapshotter" "replicas" .Values.replicas.snapshotter
+     "args" (list "python" "-m" "budgetguard.workers.snapshotter" "--metrics-port" "9464")
+     "ports" (list (dict "name" "metrics" "containerPort" 9464))) }}
+---
+{{ include "bg.worker" (dict "root" . "name" "reconcilers" "replicas" .Values.replicas.reconcilers
+     "args" (list "python" "-m" "budgetguard.workers.reconcilers")) }}

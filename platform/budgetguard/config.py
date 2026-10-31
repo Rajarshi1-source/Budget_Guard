@@ -35,6 +35,7 @@ class Settings(CoreSettings):
     dashboard_token_next: SecretStr | None = None             # set only during a rotation
     approver_ids: tuple[int, ...] = ()               # numeric GitHub user ids; logins can be renamed
     policy_version: str = "unknown"                  # baked into the image: git log -1 --format=%H -- policy/
+    policy_file: Path = Path("../policy/freeze-policy.yaml")   # the image sets /app/policy/freeze-policy.yaml
     public_url: str = "https://budgetguard.example.dev"
 
     def webhook_secrets(self) -> list[str]:

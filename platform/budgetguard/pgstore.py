@@ -139,14 +139,16 @@ class PgStore:
             out.setdefault((r.service, r.slo), []).append((r.day, r.bad, r.total))
         return out
 
-    async def eta_buckets(self, service: str, slo: str, now: datetime) -> list[Any]:
-        """Query 4.2, gaps filled with zero-total buckets so the replay deque holds exactly 30 days."""
+    async def eta_buckets(self, service: str, slo: str, now: datetime, self_only: bool = False) -> list[Any]:
+        """Query 4.2, gaps filled with zero-total buckets so the replay deque holds exactly 30 days.
+        self_only replays self_bad: the number the gate freezes on under charge_origin."""
+        col = "self_bad" if self_only else "bad"
         end = now.replace(second=0, microsecond=0)
         end -= timedelta(minutes=end.minute % 5)
         start = end - timedelta(days=30)
         async with self.engine.connect() as c:
-            rows = (await c.execute(text("""
-                SELECT b.bucket_start, b.bad, b.total
+            rows = (await c.execute(text(f"""
+                SELECT b.bucket_start, b.{col} AS bad, b.total
                 FROM sli_buckets b JOIN slos o ON o.id = b.slo_id JOIN services s ON s.id = o.service_id
                 WHERE s.name = :svc AND o.name = :slo AND o.active
                   AND b.bucket_start >= :start AND b.bucket_start < :end

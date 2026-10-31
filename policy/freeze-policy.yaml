@@ -1,0 +1,18 @@
+# Freeze policy v1 (plan W5.4). Policy is code: every change is backtested by policy-backtest.yml
+# (W7) before it merges, and the running version is the last commit SHA that touched this file
+# (baked into the platform image as BG_POLICY_VERSION, inserted into policy_versions on boot).
+reserve_pct: 5.0                  # budget no deploy may spend into
+spend_fraction: 0.5               # a deploy may spend at most this share of (remaining - reserve)
+attribution: charge_origin        # charge_origin (D-3: gate on self-inflicted burn) | charge_victim (Rev 2 code as written)
+self_page_share: 0.5              # a page is "self" when >= 50% of the last hour's bad events are self-inflicted
+low_traffic_prices_normally: true # false = Rev 2 behaviour (LOW_TRAFFIC treated as UNKNOWN)
+pricing:
+  prior_alpha: 2.0                # Beta(2, 18): prior change-failure rate 10% until history exists
+  prior_beta: 18.0
+  default_failure_cost_pct: 5.0   # until the service has a median from real change failures
+  w_config_only: 0.5
+  w_migration: 2.0
+  w_dependency: 1.5
+  size_tiers: [[200, 1.0], [500, 1.25]]
+  size_max: 1.5
+  multiplier_cap: 5.0

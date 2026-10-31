@@ -148,8 +148,8 @@ Checks, in this order (each failure is logged with the delivery id, never the bo
 | `X-GitHub-Event` | Action | Response |
 | --- | --- | --- |
 | `deployment_protection_rule` (`action: requested`) | Environment must match `^production-[a-z][a-z0-9-]{1,40}$` and name a service in `services` → enqueue a gate evaluation | `{"accepted": true}` first time, `{"accepted": false}` for a duplicate |
-| `deployment_status` | `XADD bg:deploy-events` (DORA, change-failure timers, Flow 5) | `{"accepted": true\|false}` |
-| `pull_request` (`closed` + merged) | Record PR → SHA mapping for lead time and change features | `{"accepted": true\|false}` |
+| `deployment_status` | Environment `production-<service>` → `enqueue_once` onto `bg:deploy-events` with only `{event, service, deployment_id, sha, state, at, run_id}` (DORA, change-failure timers, Flow 5); other environments ignored | `{"accepted": true\|false}`; Valkey down → **503** (redeliverable) |
+| `pull_request` (`closed` + merged) | `enqueue_once` onto `bg:deploy-events` with `{event, number, merge_commit_sha, merged_at, created_at, base}` for lead time and change features; unmerged → ignored | `{"accepted": true\|false}`; Valkey down → **503** |
 | `ping` | none | `{"ignored": "ping"}` |
 | anything else | none | `{"ignored": "<event>"}` |
 
@@ -165,10 +165,16 @@ Checks, in this order (each failure is logged with the delivery id, never the bo
      `ON CONFLICT DO NOTHING` on both unique keys. An override re-run creates a new deployment,
      so this does not block legitimate re-evaluations. Confirm both field behaviours against a
      captured payload at kickoff.
+   - As built (W5): when the existing decision's `callback_state` is not `sent` (a worker died
+     between commit and callback), the worker re-sends the comment stored in
+     `decisions.inputs.comment` instead of re-deciding; it never writes a second row.
 6. If Valkey is down: evaluate inline (still under GitHub's 10 s webhook timeout) and rely on
    the PostgreSQL unique keys. If PostgreSQL is also down and the decision cannot be recorded
    or buffered → **503**, so the delivery shows as failed and the redelivery reconciler (§8,
-   T-1) retries it. Never answer GitHub with a verdict you have not recorded.
+   T-1) retries it. Never answer GitHub with a verdict you have not recorded. As built (W5): the
+   inline path uses two callback attempts to stay inside the timeout; with PostgreSQL down and
+   Valkey up, the worker writes the record to `bg:records-pending` (Valkey AOF) **before** the
+   callback and replays it into `decisions` on recovery.
 
 The job that reaches the worker (stored in the stream, re-validated by the worker, §8 T-8):
 
@@ -505,6 +511,11 @@ Handling rules:
   `token` or `code`.
 - `.env`, kubeconfigs and `*.pem` are in `.gitignore`; CI runs a secret scanner
   (`gitleaks detect --redact`) on every PR.
+- k3s: `deploy/k3s/bootstrap.sh` reads every value from the git-ignored `deploy/k3s/.env.k3s`
+  (placeholders in `env.k3s.example`) and creates the Secrets from files in a private temp
+  directory, so no value appears on a process command line. The deployer token is written once to
+  `kubeconfig-deployer.yaml` (mode 600) for `github-setup.sh`, which stores it only as the four
+  environment secrets; delete the file afterwards.
 - Compose's `.env.example` holds placeholders only. The local stack's passwords and tokens
   (`PG_PASSWORD`, `BG_DB_{APP,GRAFANA,AUTH}_PASSWORD`, `VALKEY_PASSWORD`, `BG_ALERTMANAGER_TOKEN` = `bg_token`,
   `BG_DASHBOARD_TOKEN`, `BG_GITHUB_WEBHOOK_SECRET`, `BETTER_AUTH_SECRET`, `GRAFANA_ADMIN_PASSWORD`) are
@@ -699,11 +710,11 @@ hardening).
 | 8 | Override row deleted if the re-run call fails | `api.py` `create_override` |
 | 9 | Incident-fix lane also requires a firing `ALERTS` series | `lanes.py` |
 | 10 | Public-path guard middleware | new `edge.py` |
-| 11 | Redelivery reconciler (GitHub does not redeliver automatically) | new `workers/reconcilers.py`; corrects the delivery skill's chaos-drill row |
+| 11 | Redelivery reconciler (GitHub does not redeliver automatically) | new `workers/reconcilers.py`; corrects the delivery skill's chaos-drill row. **Done W5** (plus admin-bypass ingestion) |
 | 12 | Environment drift and cluster digest drift reconcilers | `workers/reconcilers.py` |
-| 13 | `cosign verify --certificate-github-workflow-sha` | `deploy.yml` |
-| 14 | CODEOWNERS covers `/.github/workflows/` and `/deploy/`; actions pinned by SHA | `.github/CODEOWNERS`, all workflows |
+| 13 | `cosign verify --certificate-github-workflow-sha` | `deploy.yml`. **Done W5** |
+| 14 | CODEOWNERS covers `/.github/workflows/` and `/deploy/`; actions pinned by SHA | `.github/CODEOWNERS`, all workflows. **Done W5**; `scripts/lint_workflows.py` fails CI on an unpinned action or a KUBECONFIG reference outside an environment job |
 | 15 | `bg_grafana` read-only role; Prometheus query limits | `003_roles.sql`, Prometheus args |
-| 16 | `bg-apps` NetworkPolicy; Valkey password | delivery charts |
+| 16 | `bg-apps` NetworkPolicy; Valkey password | delivery charts. **Done W5**: `deploy/k3s/bg-apps-networkpolicy.yaml` (Traefik + monitoring only, applied by bootstrap, not by the deployer), `deploy/k3s/data.yaml` |
 | 17 | auth-service `/validate` takes the token in a header, not `?t=` | `budgetguard-spring-services` client and controller |
 | 18 | Dual dashboard and Alertmanager tokens during rotation | `config.py`, `auth.py` |
