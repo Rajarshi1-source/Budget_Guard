@@ -29,7 +29,7 @@ import random
 import socket
 import sys
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from .. import redact
 from ..briefs import Eta, template_comment
+from ..changes import Change, PullRequest, extract
 from ..config import Settings, get_settings
 from ..db import DB_DOWN
 from ..eta import BUCKET, Bucket, unfreeze_eta
@@ -47,7 +48,14 @@ from ..gather import History, Signals, gather_signals, history
 from ..integrations.github_app import AppMisconfigured, JobRejected, post_review, validate_job
 from ..integrations.prometheus import PrometheusClient
 from ..integrity import Integrity
-from ..lanes import LaneProof, consume_override, override_proof, rollback_proof, service_tree_sha
+from ..lanes import (
+    LaneProof,
+    consume_override,
+    incident_fix_proof,
+    override_proof,
+    rollback_proof,
+    service_tree_sha,
+)
 from ..policy import Policy
 from ..pricing import ChangeFeatures
 from ..records import DeployFacts, build_inputs, to_gate_input
@@ -106,8 +114,9 @@ RETURNING id
 
 INSERT_DEPLOYMENT = text("""
 INSERT INTO deployments (service_id, decision_id, sha, service_tree_sha, lines_changed, touches_migration,
-                         config_only, dependency_bump, started_at, status)
-SELECT s.id, :decision_id, :sha, :tree_sha, :lines, :migration, :config_only, :dependency, :at, 'in_progress'
+                         config_only, dependency_bump, started_at, status, pr_number, first_commit_at)
+SELECT s.id, :decision_id, :sha, :tree_sha, :lines, :migration, :config_only, :dependency, :at, 'in_progress',
+       :pr_number, :first_commit_at
 FROM services s WHERE s.name = :service
 """)
 
@@ -152,12 +161,12 @@ async def eta_for(conn: AsyncConnection, sl: ServiceLevel, slo_name: str, policy
 
 
 def make_facts(job: dict[str, Any], sl: ServiceLevel, sig: Signals, hist: History, lane: Lane | None,
-               now: datetime) -> DeployFacts:
+               now: datetime, features: ChangeFeatures) -> DeployFacts:
     return DeployFacts(
         case_id=job["delivery"], service=sl.metadata.service, at=now, integrity=sig.integrity,
         remaining_all_pct=sig.remaining_all_pct, remaining_self_pct=sig.remaining_self_pct,
         page_firing=sig.page_firing, self_share_1h=sig.self_share_1h, lane=lane,
-        features=ChangeFeatures.unknown(),          # PR feature extraction is W6.1: priced at size_max
+        features=features,
         prior_deploys=hist.deploys, prior_failures=hist.failures,
         median_failure_cost_pct=hist.median_failure_cost_pct, failure_mode=sl.spec.failure_mode)
 
@@ -192,8 +201,12 @@ async def _mark_callback(ctx: Context, decision_id: int | None, sent: bool) -> N
         log.warning("could not record callback state for decision %s", decision_id)
 
 
+UNKNOWN_CHANGE = Change(ChangeFeatures.unknown(), None,
+                        note="PR data unavailable: priced at the largest size")
+
+
 async def _gather(ctx: Context, job: dict[str, Any], sl: ServiceLevel,
-                  now: datetime) -> tuple[Signals, History, str | None]:
+                  now: datetime) -> tuple[Signals, History, str | None, Change]:
     async def tree() -> str | None:
         reader = ctx.github(job["installation_id"])
         if reader is None:
@@ -212,11 +225,38 @@ async def _gather(ctx: Context, job: dict[str, Any], sl: ServiceLevel,
         except DB_DOWN:
             return History(0, 0, None)
 
+    async def change() -> Change:
+        reader = ctx.github(job["installation_id"])
+        if reader is None:
+            return UNKNOWN_CHANGE
+        try:
+            return await extract(reader, job["repo"], job["sha"], sl.metadata.service)
+        except (httpx.HTTPError, KeyError, TypeError, AttributeError, ValueError, AppMisconfigured) as e:
+            log.warning("change extraction failed (%s): priced at size_max", type(e).__name__)
+            return UNKNOWN_CHANGE
+
     async with asyncio.TaskGroup() as tg:
         s = tg.create_task(gather_signals(ctx.prom, ctx.engine, sl, now))
         h = tg.create_task(hist())
         t = tg.create_task(tree())
-    return s.result(), h.result(), t.result()
+        c = tg.create_task(change())
+    return s.result(), h.result(), t.result(), c.result()
+
+
+def _first_commit(c: Change) -> datetime | None:
+    if c.pr is None or not c.pr.first_commit_at:
+        return None
+    return datetime.fromisoformat(c.pr.first_commit_at.replace("Z", "+00:00"))
+
+
+def _change_json(c: Change) -> dict[str, Any]:
+    return {"features": asdict(c.features), "note": c.note, "service_files": c.service_files,
+            "pr": asdict(c.pr) if c.pr else None}
+
+
+def _change_from_json(d: dict[str, Any]) -> Change:
+    return Change(ChangeFeatures(**d["features"]), PullRequest(**d["pr"]) if d["pr"] else None,
+                  service_files=d["service_files"], note=d["note"])
 
 
 async def _cached(ctx: Context, service: str, sha: str) -> tuple[str, dict[str, Any] | None]:
@@ -256,9 +296,10 @@ async def evaluate_job(ctx: Context, job: dict[str, Any]) -> Outcome:
     if cached is not None:
         sig = Signals(**{**cached["signals"], "integrity": Integrity(cached["signals"]["integrity"])})
         hist, tree_sha = History(**cached["history"]), cached["tree_sha"]
+        change = _change_from_json(cached["change"])
         now = datetime.fromisoformat(cached["at"])
     else:
-        sig, hist, tree_sha = await _gather(ctx, job, sl, now)
+        sig, hist, tree_sha, change = await _gather(ctx, job, sl, now)
 
     github = {k: job.get(k) for k in ("repo", "installation_id", "environment", "callback_url", "run_id")}
     try:
@@ -267,39 +308,45 @@ async def evaluate_job(ctx: Context, job: dict[str, Any]) -> Outcome:
         async with ctx.engine.begin() as conn:
             override = await override_proof(conn, sl.metadata.service, job["sha"])
             rollback = await rollback_proof(conn, sl.metadata.service, tree_sha)
-            proof = rollback if rollback.lane is not None else override
-            facts, gi, d = _decide(ctx, job, sl, sig, hist, proof, now)
+            fix = await incident_fix_proof(conn, ctx.prom, sl.metadata.service, change.pr)
+            proof = next((p for p in (rollback, override, fix) if p.lane is not None), LaneProof(None))
+            facts, gi, d = _decide(ctx, job, sl, sig, hist, proof, now, change.features)
             threshold = affordable_threshold(d, ctx.policy)
             eta = (await eta_for(conn, sl, sig.constraining_slo, ctx.policy, now, threshold)
                    if threshold is not None else None)
-            evidence = {**rollback.evidence, **override.evidence} if proof is override else rollback.evidence
-            inputs = build_inputs(facts, gi, ctx.policy, evidence, github)
+            evidence = {**rollback.evidence, **override.evidence, **fix.evidence}
+            inputs = build_inputs(facts, gi, ctx.policy, evidence, github) | {"change": _change_json(change)}
             inputs["comment"] = ""                    # filled after the id is known (decision URL)
             row = (await conn.execute(INSERT_DECISION, _decision_params(job, gi, d, inputs))).first()
             if row is None:                           # another worker won the race on a unique key
                 return Outcome("duplicate")
             decision_id = int(row.id)
             comment = template_comment(sl.metadata.service, d, decision_url(ctx.settings, decision_id), eta,
-                                       gi.remaining_pct)
+                                       gi.remaining_pct, note=change.note)
             await conn.execute(text("UPDATE decisions SET inputs = jsonb_set(inputs, '{comment}', to_jsonb("
                                     "CAST(:c AS text))) WHERE id = :i"), {"c": comment, "i": decision_id})
             if proof.override_id is not None and proof is override:
                 await consume_override(conn, proof.override_id, decision_id)
             if d.verdict is not Verdict.BLOCK:
+                f = change.features if change.pr else ChangeFeatures(0, False, False, False)
                 await conn.execute(INSERT_DEPLOYMENT, {
                     "decision_id": decision_id, "sha": job["sha"], "tree_sha": tree_sha,
-                    "service": sl.metadata.service,
-                    "lines": 0, "migration": False, "config_only": False, "dependency": False, "at": now})
+                    "service": sl.metadata.service, "lines": f.lines_changed,
+                    "migration": f.touches_migration,
+                    "config_only": f.config_only, "dependency": f.dependency_bump, "at": now,
+                    "pr_number": change.pr.number if change.pr else None,
+                    "first_commit_at": _first_commit(change)})
         status = "decided"
     except DB_DOWN:
         # PostgreSQL unavailable: no lane proof can be checked; buffer the record durably first.
-        facts, gi, d = _decide(ctx, job, sl, sig, hist, LaneProof(None), now)
+        facts, gi, d = _decide(ctx, job, sl, sig, hist, LaneProof(None), now, change.features)
         if ctx.valkey is None:
             raise                                    # neither store: leave the run waiting (fail-closed)
         decision_id = None
         comment = template_comment(sl.metadata.service, d, decision_url(ctx.settings, None), None,
-                                   gi.remaining_pct)
-        inputs = build_inputs(facts, gi, ctx.policy, {}, github) | {"comment": comment}
+                                   gi.remaining_pct, note=change.note)
+        inputs = build_inputs(facts, gi, ctx.policy, {}, github) | {"comment": comment,
+                                                                    "change": _change_json(change)}
         await ctx.valkey.xadd(PENDING, {"record": json.dumps(_decision_params(job, gi, d, inputs))},
                               maxlen=10_000, approximate=True)
         status = "buffered"
@@ -309,7 +356,7 @@ async def evaluate_job(ctx: Context, job: dict[str, Any]) -> Outcome:
             "signals": _signals_json(sig),
             "history": {"deploys": hist.deploys, "failures": hist.failures,
                         "median_failure_cost_pct": hist.median_failure_cost_pct},
-            "tree_sha": tree_sha, "at": now.isoformat()}), ex=CACHE_S)
+            "tree_sha": tree_sha, "change": _change_json(change), "at": now.isoformat()}), ex=CACHE_S)
 
     sent = await _callback(ctx, job, d.verdict is not Verdict.BLOCK, comment)
     await _mark_callback(ctx, decision_id, sent)
@@ -329,8 +376,9 @@ def _signals_json(s: Signals) -> dict[str, Any]:
 
 
 def _decide(ctx: Context, job: dict[str, Any], sl: ServiceLevel, sig: Signals, hist: History,
-            proof: LaneProof, now: datetime) -> tuple[DeployFacts, GateInput, Decision]:
-    facts = make_facts(job, sl, sig, hist, proof.lane, now)
+            proof: LaneProof, now: datetime,
+            features: ChangeFeatures) -> tuple[DeployFacts, GateInput, Decision]:
+    facts = make_facts(job, sl, sig, hist, proof.lane, now, features)
     gi = to_gate_input(facts, ctx.policy)
     return facts, gi, evaluate(gi)
 

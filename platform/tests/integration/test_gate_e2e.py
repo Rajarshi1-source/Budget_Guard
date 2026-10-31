@@ -102,7 +102,9 @@ def burning_prometheus(page: bool) -> httpx.MockTransport:
 
 class Trees:
     """Fake git trees API: sha 'rollback…' has the old subtree, anything else a new one."""
-    async def get(self, path: str) -> dict[str, Any]:
+    async def get(self, path: str) -> Any:
+        if path.endswith("/pulls"):                         # change extraction: a direct push, no PR
+            return []
         if "/git/commits/" in path:
             return {"tree": {"sha": "root-" + path.rsplit("/", 1)[1]}}
         sha = path.rsplit("/", 1)[1]

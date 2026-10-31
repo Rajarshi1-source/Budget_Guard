@@ -251,6 +251,72 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 6,
+      "title": "Chargeback: who caused the bad events (30 days)",
+      "type": "table",
+      "description": "Query 4.6 (D-3). Self share is what the gate charges under attribution charge_origin; the rest was caused by a dependency, so it freezes the dependency, not this service.",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT s.name AS service,\n       round((100.0 * sum(b.self_bad) / NULLIF(sum(b.bad), 0))::numeric, 1) AS self_share_pct,\n       round((sum(b.bad) - sum(b.self_bad))::numeric, 0) AS dependency_bad_events,\n       round(sum(b.bad)::numeric, 0) AS bad_events\nFROM sli_buckets b JOIN slos o ON o.id = b.slo_id JOIN services s ON s.id = o.service_id\nWHERE o.name = 'availability' AND b.bucket_start >= now() - INTERVAL '30 days' AND s.name IN ($service)\nGROUP BY s.name ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Freeze impact: blocked deploys and freeze minutes",
+      "type": "timeseries",
+      "description": "From the freeze_impact view over decisions. A block freezes the service until its next decision; the backtester (W7) compares these minutes across policies as false-freeze minutes.",
+      "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "timescaledb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT day AS time, service || ' freeze min' AS metric, freeze_minutes AS value\nFROM freeze_impact WHERE $__timeFilter(day) AND service IN ($service)\nUNION ALL\nSELECT day, service || ' blocked', blocked_deploys\nFROM freeze_impact WHERE $__timeFilter(day) AND service IN ($service)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 50
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }

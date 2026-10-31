@@ -8,3 +8,7 @@
 ---
 {{ include "bg.worker" (dict "root" . "name" "reconcilers" "replicas" .Values.replicas.reconcilers
      "args" (list "python" "-m" "budgetguard.workers.reconcilers")) }}
+---
+{{/* deployment_status -> deployments rows; settles change failures 60 min after each deploy (W6.3). */}}
+{{ include "bg.worker" (dict "root" . "name" "deploy-recorder" "replicas" .Values.replicas.deployRecorder
+     "args" (list "python" "-m" "budgetguard.workers.deploy_events")) }}
