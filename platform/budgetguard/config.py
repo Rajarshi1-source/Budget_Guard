@@ -18,6 +18,9 @@ class CoreSettings(BaseSettings):
     prometheus_url: str = "http://prometheus:9090"
     prometheus_timeout_s: float = 3.0
     slo_dir: Path = Path("slo")                      # the ServiceLevel specs (copied into the image)
+    prompt_dir: Path = Path("prompts")               # Freeze Brief prompts, versioned by sha256 (W7)
+    llm_config: Path = Path("config/llm.yaml")       # the only place a model name appears
+    slack_briefs_url: SecretStr | None = None        # #bg-briefs incoming webhook; unset = not posted
 
 
 class Settings(CoreSettings):

@@ -243,6 +243,16 @@ async def _gather(ctx: Context, job: dict[str, Any], sl: ServiceLevel,
     return s.result(), h.result(), t.result(), c.result()
 
 
+def _eta_json(eta: Eta | None, now: datetime) -> dict[str, Any] | None:
+    """The Freeze Brief explains the ETA from the record (brief_view), so store it with the decision."""
+    if eta is None or eta.if_clean is None:
+        return None
+    return {"eta_utc": eta.if_clean.strftime("%Y-%m-%dT%H:%MZ"),
+            "eta_in_hours": round((eta.if_clean - now).total_seconds() / 3600, 1),
+            "at_half_budget_utc": (eta.at_half_budget.strftime("%Y-%m-%dT%H:%MZ")
+                                   if eta.at_half_budget else None)}
+
+
 def _first_commit(c: Change) -> datetime | None:
     if c.pr is None or not c.pr.first_commit_at:
         return None
@@ -315,7 +325,8 @@ async def evaluate_job(ctx: Context, job: dict[str, Any]) -> Outcome:
             eta = (await eta_for(conn, sl, sig.constraining_slo, ctx.policy, now, threshold)
                    if threshold is not None else None)
             evidence = {**rollback.evidence, **override.evidence, **fix.evidence}
-            inputs = build_inputs(facts, gi, ctx.policy, evidence, github) | {"change": _change_json(change)}
+            inputs = build_inputs(facts, gi, ctx.policy, evidence, github) | {"change": _change_json(change),
+                                                                              "eta": _eta_json(eta, now)}
             inputs["comment"] = ""                    # filled after the id is known (decision URL)
             row = (await conn.execute(INSERT_DECISION, _decision_params(job, gi, d, inputs))).first()
             if row is None:                           # another worker won the race on a unique key

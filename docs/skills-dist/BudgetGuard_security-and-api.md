@@ -487,6 +487,8 @@ As built (W5-W6): the gate worker's read token is `{"contents": "read", "pull_re
 (git trees for the rollback proof; PR, files and commits for change features and the incident-fix lane);
 the callback token is `{"deployments": "write"}`; the re-run token `{"actions": "write"}`; the
 reconcilers' token `{"deployments": "read"}` plus the App JWT for `/app/hook/deliveries`.
+The brief writer (W7) comments on the merged PR with `{"pull_requests": "write"}`, only for the
+configured installation; the CI DSNs above are optional (each step skips with a notice when unset).
 
 ## 7. Secrets inventory and rotation
 
@@ -505,6 +507,10 @@ reconcilers' token `{"deployments": "read"}` plus the App JWT for `/app/hook/del
 | `BG_FAULTS_TOKEN` | services, k6, Makefile | k8s Secret; local env | Burn any service's budget for up to an hour (demo DoS) | Replace → restart services and k6 | 90 days or after every public demo |
 | Slack webhook URL / bot token | Alertmanager, brief-writer | k8s Secrets | Post to the channels | Regenerate in Slack → Secret → restart | on suspicion |
 | `OPENAI_API_KEY` (or other provider key) | brief-writer only | k8s Secret | Spend money (capped by the provider-side limit and `monthly_budget_usd`) | New key → Secret → revoke old | 90 days |
+| `BG_SLACK_BRIEFS_URL` (#bg-briefs webhook) | brief-writer | k8s Secret / compose env (W7) | Post to #bg-briefs | Regenerate in Slack → Secret → restart | on suspicion |
+| `BG_READONLY_DSN` | policy-backtest.yml (export history) | GitHub repo secret | Read decisions and deployments (SELECT only on those) | New password for the read-only role → `gh secret set` | 180 days |
+| `BG_POLICY_DSN` | policy-backtest.yml publish job (on push to main) | GitHub repo secret | Insert/update `policy_versions` only | New password → `gh secret set` | 180 days |
+| `BG_EVAL_DSN` | brief-eval.yml | GitHub repo secret | Insert into `eval_runs` only | New password → `gh secret set` | 180 days |
 | Cloudflare tunnel token / credentials | cloudflared | k8s Secret in `edge` | Route the hostnames somewhere else | `cloudflared tunnel token --cred-file` rotation → Secret → restart | 180 days |
 | cosign | — | none: keyless (Fulcio cert from the workflow's OIDC identity) | — | — | — |
 

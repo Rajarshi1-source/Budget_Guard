@@ -12,3 +12,7 @@
 {{/* deployment_status -> deployments rows; settles change failures 60 min after each deploy (W6.3). */}}
 {{ include "bg.worker" (dict "root" . "name" "deploy-recorder" "replicas" .Values.replicas.deployRecorder
      "args" (list "python" "-m" "budgetguard.workers.deploy_events")) }}
+---
+{{/* Freeze Briefs (W7.4): off the critical path; LLM with runtime grounding, template on any failure. */}}
+{{ include "bg.worker" (dict "root" . "name" "brief-writer" "replicas" .Values.replicas.briefWriter
+     "args" (list "python" "-m" "budgetguard.workers.brief_writer")) }}

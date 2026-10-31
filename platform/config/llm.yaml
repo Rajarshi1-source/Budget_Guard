@@ -1,0 +1,14 @@
+# platform/config/llm.yaml - the only place a model name appears
+llm:
+  provider: openai            # openai | anthropic | ollama | template
+  model: gpt-5.4-mini
+  challenger: gpt-6-luna      # evaluated nightly by brief-eval.yml, never served
+  timeout_ms: 4000
+  max_output_tokens: 300
+  monthly_budget_usd: 5
+  on_failure: template        # informational; the writer always falls back to the template
+  # Model names and prices are Rev 2 §E's choice (re-check against the provider before the first
+  # real run); switching is a config PR measured by brief-eval.yml (challenger promotion rule).
+  pricing:                    # USD per 1M tokens
+    gpt-5.4-mini: {input: 0.75, output: 4.50}
+    gpt-6-luna:   {input: 0.10, output: 0.50}

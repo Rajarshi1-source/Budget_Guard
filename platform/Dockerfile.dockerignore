@@ -6,6 +6,8 @@
 !platform/budgetguard/
 !platform/migrations/
 !platform/sql/
+!platform/prompts/
+!platform/config/
 !slo/
 !policy/
 **/__pycache__

@@ -1,0 +1,121 @@
+name: policy-backtest
+
+# D-6: a change to the freeze policy, or to the code that applies it, is replayed against history
+# and the synthetic incident library, and blocked on regression (budgetguard-mlops-evals §2).
+# Main's code with main's policy vs the PR's code with the PR's policy, in two checkouts.
+on:
+  pull_request:
+    paths: [policy/**, platform/budgetguard/gate.py, platform/budgetguard/pricing.py,
+            platform/budgetguard/records.py, platform/budgetguard/policy.py, platform/backtest/**,
+            .github/workflows/policy-backtest.yml]
+  push:
+    branches: [main]
+    paths: [policy/**, platform/budgetguard/gate.py, platform/budgetguard/pricing.py,
+            platform/budgetguard/records.py, platform/budgetguard/policy.py, platform/backtest/**]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: policy-backtest-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  backtest:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+
+      - name: Check out main next to the PR
+        env: { BASE_REF: "${{ github.base_ref }}" }
+        run: git worktree add "$RUNNER_TEMP/base" "origin/$BASE_REF"
+
+      - name: Export labelled history (read-only role; skipped without credentials or on fork PRs)
+        env:
+          BG_READONLY_DSN: ${{ secrets.BG_READONLY_DSN }}
+        run: |
+          if [ -n "${BG_READONLY_DSN}" ]; then
+            uv run --project platform python -m backtest.export_history --since 180d --out "$RUNNER_TEMP/history.jsonl"
+          else
+            echo "::notice::No history credentials (BG_READONLY_DSN): synthetic cases only"
+          fi
+
+      - name: Score main (main's code + main's policy)
+        run: |
+          VERSION=$(git -C "$RUNNER_TEMP/base" rev-parse HEAD)
+          if [ -d "$RUNNER_TEMP/base/platform/backtest" ]; then
+            cd "$RUNNER_TEMP/base/platform" && uv sync --frozen
+          else                       # the PR that introduces the backtester: main's policy, this PR's code
+            echo "::notice::main has no backtester yet; scoring main's policy with this PR's code"
+            cd platform && uv sync --frozen
+          fi
+          uv run python -m backtest.cli score --policy "$RUNNER_TEMP/base/policy/freeze-policy.yaml" \
+            --version "$VERSION" --history "$RUNNER_TEMP/history.jsonl" --out "$RUNNER_TEMP/base.json"
+
+      - name: Score this PR (PR code + PR policy)
+        working-directory: platform
+        env: { HEAD_SHA: "${{ github.event.pull_request.head.sha }}" }
+        run: |
+          uv sync --frozen
+          uv run python -m backtest.cli score --policy ../policy/freeze-policy.yaml --version "$HEAD_SHA" \
+            --history "$RUNNER_TEMP/history.jsonl" --out "$RUNNER_TEMP/cand.json"
+
+      - name: Compare and gate
+        id: compare
+        working-directory: platform
+        run: |
+          set +e
+          uv run python -m backtest.cli compare --base "$RUNNER_TEMP/base.json" \
+            --cand "$RUNNER_TEMP/cand.json" --report "$RUNNER_TEMP/report.md"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR (same-repo PRs only)
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR" --edit-last --body-file "$RUNNER_TEMP/report.md" \
+            || gh pr comment "$PR" --body-file "$RUNNER_TEMP/report.md"
+
+      - name: Fail on regression
+        if: steps.compare.outputs.rc != '0'
+        run: exit 1
+
+  publish:                                   # on merge: store the merged policy's report for /policy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults: { run: { working-directory: platform } }
+    env:
+      BG_POLICY_DSN: ${{ secrets.BG_POLICY_DSN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with: { fetch-depth: 2 }
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      - run: uv sync --frozen
+      - name: Score before and after the merge, then publish
+        run: |
+          git worktree add "$RUNNER_TEMP/prev" HEAD~1
+          PREV="$RUNNER_TEMP/prev/platform"; [ -d "$PREV/backtest" ] || PREV="$PWD"
+          (cd "$PREV" && uv sync --frozen && uv run python -m backtest.cli score \
+             --policy "$RUNNER_TEMP/prev/policy/freeze-policy.yaml" \
+             --version "$(git -C "$RUNNER_TEMP/prev" rev-parse HEAD)" --out "$RUNNER_TEMP/base.json")
+          uv run python -m backtest.cli score --policy ../policy/freeze-policy.yaml --version "$GITHUB_SHA" \
+            --out "$RUNNER_TEMP/cand.json"
+          uv run python -m backtest.cli compare --base "$RUNNER_TEMP/base.json" --cand "$RUNNER_TEMP/cand.json" \
+            --report "$RUNNER_TEMP/report.md" || true
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$BG_POLICY_DSN" ]; then
+            echo "::notice::BG_POLICY_DSN not set: report not published to policy_versions"; exit 0
+          fi
+          # policy version = last commit that touched the policy file (the rule the platform uses on boot)
+          uv run python -m backtest.cli publish --report "$RUNNER_TEMP/report.md" \
+            --version "$(git log -1 --format=%H -- ../policy/freeze-policy.yaml)"
