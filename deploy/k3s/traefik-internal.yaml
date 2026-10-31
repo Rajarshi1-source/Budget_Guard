@@ -1,0 +1,30 @@
+# Traefik (bundled with k3s) gets a second, ClusterIP-only entrypoint `internal` on :8081. Services
+# call each other at http://<name>.bg-apps.internal, which CoreDNS rewrites to Traefik, so Argo
+# Rollouts' TraefikService weights apply to service-to-service traffic, not only to the ingress
+# (budgetguard-delivery-platform flag 1). Without this a "5%" canary of auth gets all of orders' calls.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata: { name: traefik, namespace: kube-system }
+spec:
+  valuesContent: |-
+    ports:
+      internal:
+        port: 8081
+        expose: { default: false }       # never on the LoadBalancer; reached through the Service below
+        exposedPort: 80
+        protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata: { name: traefik-internal, namespace: kube-system }
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: traefik }
+  ports: [{ name: internal, port: 80, targetPort: 8081 }]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: coredns-custom, namespace: kube-system }   # k3s imports *.override into its Corefile
+data:
+  bg-apps-internal.override: |
+    rewrite name regex (.+)\.bg-apps\.internal traefik-internal.kube-system.svc.cluster.local answer auto

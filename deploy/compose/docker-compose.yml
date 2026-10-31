@@ -1,6 +1,7 @@
 # Compose v2 (W4.1): the four services under test, Prometheus with the generated SLO rules,
 # Alertmanager and blackbox (W1-W3), plus TimescaleDB, Valkey, the platform (migrate job, API,
-# snapshotter x2), Grafana and the dashboard, as in
+# snapshotter x2, gate worker x2 from W5, reconcilers behind the `github` profile), Grafana and the
+# dashboard, as in
 # budgetguard-delivery-platform/references/manifests-and-workflows.md §1.
 # Run from the repo root inside WSL `Ubuntu-D`: make up   (tags: .env.versions; secrets: make secrets)
 #
@@ -140,6 +141,16 @@ services:
               "--backfill-hours", "${BG_BACKFILL_HOURS:-6}"]
     deploy: { replicas: 2 }                        # one holds pg_try_advisory_lock(724001); the other waits
 
+  gate-worker:                                     # W5: consumes bg:gate-evaluations (group gate-workers)
+    <<: *platform
+    command: ["python", "-m", "budgetguard.workers.gate_worker"]
+    deploy: { replicas: 2 }                        # XAUTOCLAIM adopts a killed worker's jobs after 60 s
+
+  reconcilers:                                     # needs a real GitHub App: docker compose --profile github
+    <<: *platform
+    profiles: ["github"]
+    command: ["python", "-m", "budgetguard.workers.reconcilers"]
+
   grafana:
     image: grafana/grafana:${GRAFANA_TAG:?set in .env.versions}
     restart: unless-stopped
@@ -151,6 +162,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?make secrets}"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       BG_DB_GRAFANA_PASSWORD: "${BG_DB_GRAFANA_PASSWORD:?make secrets}"   # read by the datasource file
+      BG_PROMETHEUS_URL: http://prometheus:9090                         # datasource hosts (k3s sets its own)
+      BG_TSDB_HOST: timescaledb:5432
     volumes:
       - ../../grafana/provisioning:/etc/grafana/provisioning:ro
       - ../../grafana/dashboards:/var/lib/grafana/dashboards:ro

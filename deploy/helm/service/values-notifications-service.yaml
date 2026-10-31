@@ -1,0 +1,2 @@
+# notifications-service: merged over values.yaml by deploy.yml (-f deploy/helm/service/values-notifications-service.yaml)
+internalHost: notifications.bg-apps.internal

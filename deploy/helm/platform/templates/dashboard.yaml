@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: dashboard, labels: { app: dashboard } }
+spec:
+  replicas: {{ .Values.replicas.dashboard }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector: { matchLabels: { app: dashboard } }
+  template:
+    metadata: { labels: { app: dashboard, budgetguard/role: platform } }
+    spec:
+      {{- include "bg.podSecurity" . | nindent 6 }}
+      containers:
+        - name: dashboard
+          image: "{{ required "dashboardImage.repository is required" .Values.dashboardImage.repository }}@{{ required "dashboardImage.digest is required" .Values.dashboardImage.digest }}"
+          env:
+            - { name: BUDGETGUARD_API, value: "http://platform-api:8000" }
+            - { name: BETTER_AUTH_URL, value: {{ .Values.publicUrl | quote }} }
+          envFrom: [{ secretRef: { name: {{ .Values.secrets.dashboard }} } }]
+          ports: [{ name: http, containerPort: 3000 }]
+          readinessProbe: { httpGet: { path: /, port: http }, periodSeconds: 10 }
+          resources: { requests: { cpu: 50m, memory: 192Mi }, limits: { memory: 384Mi } }
+          {{- include "bg.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }, { name: cache, mountPath: /app/.next/cache }]
+      volumes: [{ name: tmp, emptyDir: {} }, { name: cache, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: dashboard, labels: { app: dashboard } }
+spec:
+  selector: { app: dashboard }
+  ports: [{ name: http, port: 3000, targetPort: http }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: dashboard }
+spec: { minAvailable: 1, selector: { matchLabels: { app: dashboard } } }

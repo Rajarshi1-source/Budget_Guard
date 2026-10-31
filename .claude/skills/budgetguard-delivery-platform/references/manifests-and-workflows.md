@@ -526,6 +526,17 @@ Verified 25 Oct 2026: both charts (the platform chart with a minimal `Chart.yaml
 `values.yaml` added) pass `helm lint` with Helm 4.2.4, and the 11 rendered objects pass
 `kubeconform -strict` against Kubernetes 1.36 and the CRD catalog, the same check `ci.yml` (§8) runs.
 
+**As built in W5 (31 Oct 2026):** the platform chart in the repo adds gate-worker, snapshotter,
+reconcilers, dashboard, Grafana (provisioning as ConfigMaps from `grafana/`), a pre-install/upgrade
+Alembic Job, default-deny NetworkPolicies and a PodMonitor; Secrets are created by
+`deploy/k3s/bootstrap.sh`, never templated. Both charts and every `deploy/k3s/*.yaml` render to 66
+objects that pass `kubeconform -strict` on 1.36 (CI `helm` job). Per-service values live in
+`deploy/helm/service/values-<service>.yaml`; `image.repository`, `image.digest` and `internalHost` are
+`required`. The internal entrypoint needs two pieces this file did not have:
+`deploy/k3s/traefik-internal.yaml` (HelmChartConfig adding a ClusterIP-only `internal` port, a
+`traefik-internal` Service, and a `coredns-custom` rewrite of `*.bg-apps.internal`), and a bg-apps
+NetworkPolicy admitting only Traefik and monitoring, so no caller can bypass the canary weights.
+
 ## 5. Cluster bootstrap (Oracle A1, ARM64)
 
 ```bash

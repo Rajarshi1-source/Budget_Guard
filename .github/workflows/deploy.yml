@@ -1,0 +1,117 @@
+name: deploy
+
+# One job per changed service, gated by BudgetGuard: `environment: production-<service>` makes GitHub
+# hold the job until the custom protection rule answers, and KUBECONFIG exists only in that
+# environment, so removing the line removes the credentials (security-and-api.md T-3).
+# The fixes against Rev 2 §10.2 are marked FIX n (budgetguard-delivery-platform §2).
+on:
+  workflow_run:
+    workflows: [build-push]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write                    # the OIDC token that GET /v1/decisions verifies
+
+jobs:
+  changes:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d   # v4.0.3
+        with:
+          base: ${{ github.event.workflow_run.head_sha }}~1
+          filters: |
+            auth-service: services/auth-service/**
+            orders-service: services/orders-service/**
+            inventory-service: services/inventory-service/**
+            notifications-service: services/notifications-service/**
+
+  deploy:
+    needs: changes
+    if: needs.changes.outputs.services != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 1                    # one service at a time keeps attribution clean
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    environment: production-${{ matrix.service }}   # protection rule runs here; KUBECONFIG lives only here
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SERVICE: ${{ matrix.service }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      BUDGETGUARD_URL: ${{ vars.BUDGETGUARD_URL }}
+      IMAGE_REPO: ${{ vars.DOCKERHUB_NS }}/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with: { ref: "${{ env.SHA }}" }
+
+      - name: Fetch this run's decision (canary profile and bake)
+        id: decision
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                 "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=budgetguard" | jq -r .value)
+          if ! curl -sS --fail --max-time 10 -H "Authorization: Bearer $OIDC" \
+               "$BUDGETGUARD_URL/v1/decisions?service=$SERVICE&run_id=$GITHUB_RUN_ID" -o decision.json; then
+            jq -n '{canary_profile:[5,25,50,100], bake:"10m"}' > decision.json   # never the fastest
+          fi
+          # FIX 1: validate before use; the values reach helm, so treat them as untrusted input
+          jq -e '(.canary_profile|type=="array" and length>0 and all(.[]; type=="number" and .>0 and .<=100))
+                 and (.bake|test("^[0-9]{1,3}[sm]$"))' decision.json
+          echo "weights=$(jq -c .canary_profile decision.json)" >> "$GITHUB_OUTPUT"
+          echo "bake=$(jq -r .bake decision.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310          # v5.0.1
+        with: { version: v4.3.1 }
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2 (cosign v3)
+
+      - name: Resolve and verify the image
+        id: image
+        run: |
+          set -euo pipefail
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE_REPO:sha-$SHA" --format '{{json .Manifest}}' | jq -r .digest)
+          # FIX 2: Rev 2 signs images but never verifies them. Bound to the build workflow on main AND
+          # to this exact commit, so a signed image of another commit cannot be swapped in (change #13).
+          cosign verify "$IMAGE_REPO@$DIGEST" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build-push.yml@refs/heads/main" \
+            --certificate-github-workflow-sha "$SHA" > /dev/null
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Canary rollout
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+          WEIGHTS: ${{ steps.decision.outputs.weights }}     # FIX 3: env vars, not ${{ }} inside run:
+          BAKE: ${{ steps.decision.outputs.bake }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          ROLLOUTS_VERSION: v1.10.1
+        run: |
+          set -euo pipefail
+          umask 077
+          echo "$KUBECONFIG_DATA" > "$RUNNER_TEMP/kubeconfig"
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          curl -sSfL -o "$RUNNER_TEMP/kubectl-argo-rollouts" \
+            "https://github.com/argoproj/argo-rollouts/releases/download/$ROLLOUTS_VERSION/kubectl-argo-rollouts-linux-amd64"
+          chmod +x "$RUNNER_TEMP/kubectl-argo-rollouts"
+          helm upgrade --install "$SERVICE" deploy/helm/service \
+            --namespace bg-apps \
+            -f "deploy/helm/service/values-$SERVICE.yaml" \
+            --set service="$SERVICE" \
+            --set image.repository="$IMAGE_REPO" \
+            --set image.digest="$DIGEST" \
+            --set-json "canary.weights=$WEIGHTS" \
+            --set canary.bake="$BAKE"
+          # FIX 4: helm --wait does not wait for canary analysis; the rollout status does.
+          # Non-zero on abort or Degraded, so a failed canary fails the job and the deployment.
+          "$RUNNER_TEMP/kubectl-argo-rollouts" status "$SERVICE" -n bg-apps --timeout 45m
+          rm -f "$RUNNER_TEMP/kubeconfig"

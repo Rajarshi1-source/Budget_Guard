@@ -14,10 +14,11 @@ from .config import get_settings
 from .incidents import events_from_payload
 from .integrations.prometheus import PrometheusClient, PrometheusUnavailable
 from .queue import invalidate_verdicts
+from .records import replay
 from .rulegen.spec import ServiceLevel
 from .signals import slo_status
 from .store import DecisionRow, Store
-from .summary import SloInputs, Window, remaining, service_card
+from .summary import SloInputs, Window, gate_remaining, service_card
 
 router = APIRouter()
 
@@ -127,6 +128,7 @@ async def create_override(body: OverrideIn, request: Request,
 async def services_summary(request: Request, s: Store = Depends(store)) -> list[dict[str, Any]]:
     specs: list[ServiceLevel] = request.app.state.specs
     prom: PrometheusClient = request.app.state.prom
+    attribution = getattr(request.app.state, "attribution", "charge_origin")
     now = datetime.now(UTC)
     windows, daily, incidents, decisions = await asyncio.gather(
         s.slo_windows(now), s.slo_daily(now, 59), s.open_incidents(), s.last_decisions())
@@ -138,13 +140,14 @@ async def services_summary(request: Request, s: Store = Depends(store)) -> list[
         for slo in sl.spec.slos:
             raw = windows.get((svc, slo.name))
             w = Window(*raw) if raw else None
-            rem = remaining(slo.objective, w)
+            rem = gate_remaining(slo, w, attribution)
             frozen_by_budget = rem is not None and rem < sl.spec.gate.reserve_pct
+            self_only = attribution == "charge_origin" and bool(slo.sli.self_bad)
             inputs[slo.name] = SloInputs(
                 status=by_key[(svc, slo.name)], window=w, daily=daily.get((svc, slo.name), []),
-                eta_buckets=await s.eta_buckets(svc, slo.name, now) if frozen_by_budget else ())
+                eta_buckets=await s.eta_buckets(svc, slo.name, now, self_only) if frozen_by_budget else ())
         cards.append(service_card(sl, inputs, now=now, open_incident=incidents.get(svc),
-                                  last_decision=decisions.get(svc)))
+                                  last_decision=decisions.get(svc), attribution=attribution))
     return cards
 
 
@@ -172,9 +175,29 @@ async def decision_detail(decision_id: int, s: Store = Depends(store)) -> dict:
     return _decision_json(d)
 
 
+@router.post("/v1/decisions/{decision_id}/replay", dependencies=[Depends(require_dashboard)])
+async def decision_replay(decision_id: int, s: Store = Depends(store)) -> dict:
+    """Recompute the verdict from the stored GateInput with the running code. Writes nothing."""
+    d = await s.decision(decision_id)
+    if d is None:
+        raise HTTPException(404, "no such decision")
+    if "gate_input" not in d.inputs:
+        raise HTTPException(409, "decision has no stored gate input")
+    r = replay(d.inputs, d.inputs_hash, d.verdict, d.reason_code)
+    return {"verdict": str(r.decision.verdict), "reason_code": r.decision.reason_code,
+            "inputs_hash": r.inputs_hash, "matches": r.matches}
+
+
+def _brief(d: DecisionRow) -> dict | None:
+    """The template comment GitHub showed (W5); the LLM brief replaces it from W7."""
+    text = d.inputs.get("comment")
+    return {"text": text, "source": "template", "fallback_reason": None} if text else None
+
+
 def _decision_json(d: DecisionRow) -> dict:
+    inputs = {k: v for k, v in d.inputs.items() if k != "comment"}
     return {"id": d.id, "service": d.service, "sha": d.sha, "verdict": d.verdict,
             "reason_code": d.reason_code, "price_pct": d.price_pct, "affordable_pct": d.affordable_pct,
             "canary_profile": list(d.canary_profile), "policy_version": d.policy_version,
             "inputs_hash": d.inputs_hash, "decided_at": d.decided_at.isoformat(),
-            "overridable": d.overridable, "brief": None, "override": d.override, "inputs": d.inputs}
+            "overridable": d.overridable, "brief": _brief(d), "override": d.override, "inputs": inputs}

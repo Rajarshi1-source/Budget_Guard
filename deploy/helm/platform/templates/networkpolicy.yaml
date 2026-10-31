@@ -1,0 +1,45 @@
+# Default deny for bg-platform, then only the callers each component has (security-and-api.md §1).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-ingress }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: platform-api-ingress }
+spec:
+  podSelector: { matchLabels: { app: platform-api } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:                                     # cloudflared: public paths are filtered there and by edge.py
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } }
+      ports: [{ port: 8000 }]
+    - from:                                     # dashboard server-side (BFF) calls
+        - podSelector: { matchLabels: { app: dashboard } }
+      ports: [{ port: 8000 }]
+    - from:                                     # Alertmanager webhook and the Prometheus scrape of /metrics
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+      ports: [{ port: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: public-ui-ingress }
+spec:
+  podSelector:
+    matchExpressions: [{ key: app, operator: In, values: [dashboard, grafana] }]
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: edge } } }]
+      ports: [{ port: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: snapshotter-metrics }
+spec:
+  podSelector: { matchLabels: { app: snapshotter } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }]
+      ports: [{ port: 9464 }]

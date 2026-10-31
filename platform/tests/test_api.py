@@ -31,6 +31,9 @@ class FakeValkey:
 
     async def eval(self, script, numkeys, *args):
         assert script == ENQUEUE_ONCE
+        if getattr(self, "down", False):
+            from redis.exceptions import ConnectionError as ValkeyDown
+            raise ValkeyDown("valkey unavailable")
         key, stream, job = args
         if key in self.kv:
             return 0
@@ -104,7 +107,7 @@ class FakeStore:
     async def slo_daily(self, now, days):
         return {("orders-service", "availability"): [(now.date() - timedelta(days=1), 300.0, 1_000_000.0)]}
 
-    async def eta_buckets(self, service, slo, now):
+    async def eta_buckets(self, service, slo, now, self_only=False):
         return []
 
     async def open_incidents(self):
@@ -402,3 +405,105 @@ def test_metrics_reports_prometheus_reachability(client):
 
 def test_metrics_is_not_public(client):
     assert client.get("/metrics", headers={"CF-Connecting-IP": "203.0.113.9"}).status_code == 404
+
+
+# ---------------------------------------------------------------- W5: replay, brief, deploy events
+def gated_decision(**kw):
+    from budgetguard.gate import evaluate
+    from budgetguard.policy import Policy
+    from budgetguard.records import build_inputs, to_gate_input
+    from tests.test_gate import facts
+    f = facts(self_share_1h=0.8)                                   # a self-inflicted page: ACTIVE_PAGE
+    g = to_gate_input(f, Policy("p" * 40))
+    d = evaluate(g)
+    inputs = build_inputs(f, g, Policy("p" * 40), {}, {"repo": "ricky/budgetguard"}) | {"comment": "Blocked."}
+    return decision(id=4814, verdict=str(d.verdict), reason_code=d.reason_code, inputs=inputs,
+                    inputs_hash=g.digest(), **kw)
+
+
+def test_replay_recomputes_the_same_hash_and_verdict(client):
+    client.app.state.store.decisions[4814] = gated_decision()
+    r = client.post("/v1/decisions/4814/replay", headers=DASH).json()
+    assert r["matches"] is True and r["verdict"] == "block" and r["reason_code"] == "ACTIVE_PAGE"
+    assert r["inputs_hash"] == client.app.state.store.decisions[4814].inputs_hash
+
+
+def test_replay_detects_a_tampered_record_and_writes_nothing(client):
+    d = gated_decision()
+    tampered = {**d.inputs, "gate_input": {**d.inputs["gate_input"], "active_page": False}}
+    client.app.state.store.decisions[4814] = replace(d, inputs=tampered)
+    r = client.post("/v1/decisions/4814/replay", headers=DASH).json()
+    assert r["matches"] is False and r["verdict"] == "admit"
+    assert client.app.state.store.decisions[4814].inputs == tampered
+
+
+def test_replay_needs_a_stored_gate_input_and_the_dashboard_token(client):
+    assert client.post("/v1/decisions/4812/replay", headers=DASH).status_code == 409
+    assert client.post("/v1/decisions/9999/replay", headers=DASH).status_code == 404
+    assert client.post("/v1/decisions/4814/replay").status_code == 401
+
+
+def test_decision_detail_shows_the_template_brief_not_the_raw_comment(client):
+    client.app.state.store.decisions[4814] = gated_decision()
+    body = client.get("/v1/decisions/4814", headers=DASH).json()
+    assert body["brief"] == {"text": "Blocked.", "source": "template", "fallback_reason": None}
+    assert "comment" not in body["inputs"] and "gate_input" in body["inputs"]
+
+
+def event_headers(body: bytes, event: str, delivery: str) -> dict:
+    return signed(body) | {"X-GitHub-Event": event, "X-GitHub-Delivery": delivery}
+
+
+def test_deployment_status_goes_to_the_deploy_events_stream(client):
+    body = json.dumps({"installation": {"id": 99}, "repository": {"full_name": "ricky/budgetguard"},
+                       "deployment": {"id": 5001, "sha": "a" * 40,
+                                      "environment": "production-orders-service"},
+                       "deployment_status": {"state": "success", "updated_at": "2026-10-31T12:00:00Z",
+                                             "target_url": "https://github.com/ricky/budgetguard/actions/runs/777/job/1"}
+                       }).encode()
+    assert client.post("/v1/github/webhook", content=body,
+                       headers=event_headers(body, "deployment_status", "ds-1")).json() == {"accepted": True}
+    rec = client.app.state.valkey.streams["bg:deploy-events"][0]
+    assert rec == {"event": "deployment_status", "service": "orders-service", "deployment_id": 5001,
+                   "sha": "a" * 40, "state": "success", "at": "2026-10-31T12:00:00Z", "run_id": 777}
+
+
+def test_only_merged_pull_requests_are_recorded(client):
+    base = {"installation": {"id": 99}, "repository": {"full_name": "ricky/budgetguard"}, "action": "closed"}
+    unmerged = json.dumps(base | {"pull_request": {"number": 7, "merged": False}}).encode()
+    r = client.post("/v1/github/webhook", content=unmerged,
+                    headers=event_headers(unmerged, "pull_request", "pr-1"))
+    assert r.json() == {"ignored": "pull_request closed"}
+    merged = json.dumps(base | {"pull_request": {"number": 8, "merged": True, "merge_commit_sha": "b" * 40,
+                                                 "merged_at": "2026-10-31T11:00:00Z",
+                                                 "created_at": "2026-10-30T09:00:00Z",
+                                                 "base": {"ref": "main"}}}).encode()
+    assert client.post("/v1/github/webhook", content=merged,
+                       headers=event_headers(merged, "pull_request", "pr-2")).json() == {"accepted": True}
+    assert client.app.state.valkey.streams["bg:deploy-events"][0]["number"] == 8
+
+
+def test_valkey_down_without_an_inline_gate_is_a_redeliverable_503(client):
+    client.app.state.valkey.down = True
+    body = json.dumps(PROTECTION).encode()
+    assert client.post("/v1/github/webhook", content=body, headers=signed(body)).status_code == 503
+
+
+def test_valkey_and_postgres_down_inline_is_a_503_and_nothing_is_answered(client):
+    from budgetguard.config import get_settings
+    from budgetguard.policy import Policy
+    from budgetguard.rulegen.spec import load_dir as specs
+    from budgetguard.workers.gate_worker import Context
+    posted = []
+
+    async def post(*a):
+        posted.append(a)
+    http = client.app.state.prom.http
+    client.app.state.gate = Context(settings=get_settings(), policy=Policy("v1"),
+                                    specs={s.metadata.service: s for s in specs(SLO_DIR)},
+                                    prom=client.app.state.prom, engine=None, valkey=None, http=http,
+                                    post=post)
+    client.app.state.valkey.down = True
+    body = json.dumps(PROTECTION).encode()
+    assert client.post("/v1/github/webhook", content=body, headers=signed(body)).status_code == 503
+    assert posted == []

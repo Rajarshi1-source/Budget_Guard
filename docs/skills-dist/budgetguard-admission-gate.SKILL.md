@@ -455,6 +455,25 @@ the backtest as a lane case.
 | Valkey down | evaluate inline in the request handler (< 10 s); PostgreSQL `UNIQUE(github_delivery)` dedupes |
 | GitHub callback fails | decision already committed; retry with backoff |
 
+### As built in W5 (31 Oct 2026, verified against TimescaleDB 2.31 + Valkey 9.1 in CI's `integration` job)
+
+Files: `gate.py`, `pricing.py`, `policy.py`, `records.py` (`DeployFacts`, `to_gate_input`, JSON round
+trip, `replay`), `lanes.py`, `gather.py`, `briefs.py` (template), `workers/gate_worker.py`,
+`workers/reconcilers.py`. What the sketches above do not say:
+
+| Point | Rule |
+| --- | --- |
+| One GateInput per service | worst integrity across its SLOs; the most constrained SLO's budget; any SLO's page. Under `charge_origin` a page counts when that SLO's self share >= `self_page_share`; an SLI with no origin label (latency) counts as self |
+| Policy vs spec | reserve and spend fraction come from `policy/freeze-policy.yaml`; a test fails if a spec's `gate:` block disagrees |
+| PostgreSQL down | record -> `bg:records-pending` **before** the callback, replayed later; both stores down -> no answer (503 inline) |
+| What counts as "down" | `OSError, TimeoutError, OperationalError, InterfaceError` (`db.DB_DOWN`). Never `DBAPIError`: it also covers SQL bugs, and the first integration run buffered a type bug as an outage |
+| Crash between commit and callback | the redelivered job finds the decision; if `callback_state != 'sent'` it re-sends `inputs.comment`, never re-decides |
+| Bad App key | `AppMisconfigured`: callback fails once, `failed` recorded, no retry loop |
+| Cache | never stores an override decision (single use) |
+| Deployments | a row only for admitted decisions (a blocked deploy never ran) |
+| asyncpg arrays | pass `canary_profile` as a Python list; a `'{25,100}'` string is rejected |
+| Admin bypass | synthetic `ADMIN_BYPASS` decision keyed `bypass:<deployment id>` + overrides row (`decision_id` is NOT NULL) |
+
 ## 8. Tests to keep
 
 - Every row of the §3 worked example as a parametrized test.

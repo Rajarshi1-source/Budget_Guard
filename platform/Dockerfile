@@ -22,7 +22,9 @@ COPY platform/alembic.ini ./
 COPY platform/migrations ./migrations
 COPY platform/sql ./sql
 COPY slo ./slo
-ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 BG_SLO_DIR=/app/slo BG_POLICY_VERSION=$POLICY_VERSION
+COPY policy ./policy
+ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 BG_SLO_DIR=/app/slo BG_POLICY_VERSION=$POLICY_VERSION \
+    BG_POLICY_FILE=/app/policy/freeze-policy.yaml
 USER 10001
 EXPOSE 8000
 CMD ["uvicorn", "budgetguard.main:app", "--host", "0.0.0.0", "--port", "8000"]

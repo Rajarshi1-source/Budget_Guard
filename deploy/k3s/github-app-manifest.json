@@ -1,0 +1,13 @@
+{
+  "name": "BudgetGuard",
+  "url": "https://budgetguard.example.dev",
+  "hook_attributes": { "url": "https://api.budgetguard.example.dev/v1/github/webhook", "active": true },
+  "public": false,
+  "default_permissions": {
+    "deployments": "write",
+    "actions": "write",
+    "contents": "read",
+    "pull_requests": "write"
+  },
+  "default_events": ["deployment_protection_rule", "deployment_status", "pull_request"]
+}

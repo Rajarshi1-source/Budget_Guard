@@ -1,0 +1,24 @@
+# Alembic owns the schema (A-18); expand -> migrate -> contract keeps each release compatible with
+# the previous one, so the hook runs before the new pods roll out.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: platform-migrate-{{ .Release.Revision }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata: { labels: { app: platform-migrate, budgetguard/role: platform } }
+    spec:
+      restartPolicy: Never
+      {{- include "bg.podSecurity" . | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "bg.image" . | quote }}
+          args: ["sh", "-c", "alembic upgrade head && python -m budgetguard.rulegen.cli sync-slos /app/slo"]
+          envFrom: [{ secretRef: { name: {{ .Values.secrets.migrate }} } }]
+          {{- include "bg.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]

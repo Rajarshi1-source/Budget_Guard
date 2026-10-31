@@ -1,0 +1,80 @@
+# State for the public deploy (namespace data): TimescaleDB (TSL image, never -oss) and Valkey with a
+# password (security-and-api.md change #16). Credentials come from the Secrets bootstrap.sh creates.
+# Only bg-platform pods may connect; Valkey is an accelerator and never a source of truth.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: timescaledb, namespace: data }
+spec:
+  serviceName: timescaledb
+  replicas: 1
+  selector: { matchLabels: { app: timescaledb } }
+  template:
+    metadata: { labels: { app: timescaledb } }
+    spec:
+      securityContext: { fsGroup: 70 }
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:2.31.0-pg18      # .env.versions TIMESCALE_TAG
+          env:
+            - { name: POSTGRES_DB, value: budgetguard }
+            - { name: POSTGRES_USER, value: bg }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: budgetguard-data, key: PG_PASSWORD } }
+          ports: [{ name: pg, containerPort: 5432 }]
+          readinessProbe: { exec: { command: [pg_isready, -U, bg, -d, budgetguard] }, periodSeconds: 5 }
+          resources: { requests: { cpu: 200m, memory: 512Mi }, limits: { memory: 1Gi } }
+          volumeMounts: [{ name: pg, mountPath: /var/lib/postgresql }]   # PG 18 layout
+  volumeClaimTemplates:
+    - metadata: { name: pg }
+      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 10Gi } } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: timescaledb, namespace: data }
+spec:
+  selector: { app: timescaledb }
+  ports: [{ name: pg, port: 5432, targetPort: pg }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: valkey, namespace: data }
+spec:
+  serviceName: valkey
+  replicas: 1
+  selector: { matchLabels: { app: valkey } }
+  template:
+    metadata: { labels: { app: valkey } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 999, fsGroup: 999 }
+      containers:
+        - name: valkey
+          image: valkey/valkey:9.1.2                     # .env.versions VALKEY_TAG
+          command: ["sh", "-c", "exec valkey-server --appendonly yes --requirepass \"$VALKEY_PASSWORD\""]
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom: { secretKeyRef: { name: budgetguard-data, key: VALKEY_PASSWORD } }
+          ports: [{ name: valkey, containerPort: 6379 }]
+          readinessProbe:
+            exec: { command: ["sh", "-c", "valkey-cli --no-auth-warning -a \"$VALKEY_PASSWORD\" ping | grep -q PONG"] }
+            periodSeconds: 5
+          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+          volumeMounts: [{ name: data, mountPath: /data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 2Gi } } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: valkey, namespace: data }
+spec:
+  selector: { app: valkey }
+  ports: [{ name: valkey, port: 6379, targetPort: valkey }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: platform-only, namespace: data }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: bg-platform } } }]

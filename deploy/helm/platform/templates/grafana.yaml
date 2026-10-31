@@ -1,0 +1,45 @@
+# Read-only Grafana: anonymous Viewer, login form off, SQL as bg_grafana (allowlist, read-only, 5 s).
+# Provisioning comes from the repo's grafana/ folder as ConfigMaps (deploy/k3s/bootstrap.sh).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: grafana, labels: { app: grafana } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: grafana } }
+  template:
+    metadata: { labels: { app: grafana, budgetguard/role: platform } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 472, fsGroup: 472, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: grafana
+          image: {{ .Values.grafanaImage | quote }}
+          env:
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "true" }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer }
+            - { name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true" }
+            - { name: GF_USERS_ALLOW_SIGN_UP, value: "false" }
+            - { name: GF_ANALYTICS_REPORTING_ENABLED, value: "false" }
+            - { name: BG_PROMETHEUS_URL, value: "http://kube-prometheus-stack-prometheus.monitoring:9090" }
+            - { name: BG_TSDB_HOST, value: "timescaledb.data:5432" }
+          envFrom: [{ secretRef: { name: {{ .Values.secrets.grafana }} } }]
+          ports: [{ name: http, containerPort: 3000 }]
+          readinessProbe: { httpGet: { path: /api/health, port: http }, periodSeconds: 10 }
+          resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 256Mi } }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts:
+            - { name: datasources, mountPath: /etc/grafana/provisioning/datasources }
+            - { name: providers, mountPath: /etc/grafana/provisioning/dashboards }
+            - { name: dashboards, mountPath: /var/lib/grafana/dashboards }
+            - { name: data, mountPath: /var/lib/grafana }
+      volumes:
+        - { name: datasources, configMap: { name: grafana-datasources } }
+        - { name: providers, configMap: { name: grafana-providers } }
+        - { name: dashboards, configMap: { name: grafana-dashboards } }
+        - { name: data, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: grafana, labels: { app: grafana } }
+spec:
+  selector: { app: grafana }
+  ports: [{ name: http, port: 3000, targetPort: http }]

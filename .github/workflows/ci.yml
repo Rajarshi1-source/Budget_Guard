@@ -1,7 +1,8 @@
 name: ci
 
-# Week 0 skeleton (plan W0.5) plus each week's job: java, python, integration (W4), dashboard (W4),
-# rules, secrets; helm follows as in budgetguard-delivery-platform/references/manifests-and-workflows.md §8.
+# Week 0 skeleton (plan W0.5) plus each week's job: java, python, integration (W4-W5), dashboard (W4),
+# helm and workflow lint (W5), rules, secrets. Third-party actions are pinned by commit SHA and
+# scripts/lint_workflows.py fails the build if one is not (security-and-api.md change #14).
 on:
   pull_request:
   push:
@@ -22,8 +23,8 @@ jobs:
       run:
         working-directory: services
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0
         with:
           distribution: temurin
           java-version: "21"
@@ -38,8 +39,8 @@ jobs:
       run:
         working-directory: platform
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v10.3.0   # exact tag: setup-uv publishes no moving major (v10) tag
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run mypy
@@ -47,6 +48,7 @@ jobs:
       # Generated rules and tests must match the specs: a hand edit or a forgotten regenerate fails here.
       - run: uv run bg generate ../slo -o ../rules/generated --check
       - run: uv run bg tests ../slo -o ../rules/tests/generated --check
+      - run: uv run bg generate ../slo -o ../deploy/k3s/rules --format prometheus-operator --check
 
   integration:
     runs-on: ubuntu-24.04
@@ -55,19 +57,58 @@ jobs:
       run:
         working-directory: platform
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       - name: TimescaleDB (TSL image, the tag in .env.versions)
         run: |
           TAG=$(sed -n 's/^TIMESCALE_TAG=\([^ #]*\).*/\1/p' ../deploy/compose/.env.versions)
           docker run -d --name tsdb -p 5432:5432 -e POSTGRES_DB=budgetguard -e POSTGRES_USER=bg \
             -e POSTGRES_PASSWORD=itest "timescale/timescaledb:$TAG"
           for i in $(seq 60); do docker exec tsdb pg_isready -U bg -d budgetguard -h 127.0.0.1 && break; sleep 2; done
+      - name: Valkey (the tag in .env.versions)
+        run: |
+          TAG=$(sed -n 's/^VALKEY_TAG=\([^ #]*\).*/\1/p' ../deploy/compose/.env.versions)
+          docker run -d --name valkey -p 6379:6379 "valkey/valkey:$TAG"
       - run: uv sync --frozen
-      - name: migrations, snapshot idempotency, role boundaries
+      - name: migrations, snapshots, roles, webhook -> worker -> callback, lanes, override race
         env:
           BG_TEST_DATABASE_URL: postgresql+asyncpg://bg:itest@127.0.0.1:5432/budgetguard
+          BG_TEST_VALKEY_URL: redis://127.0.0.1:6379/15
         run: uv run pytest -q tests/integration
+
+  helm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310          # v5.0.1
+        with: { version: v4.3.1 }
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      - name: Workflow lint (actions pinned by SHA; KUBECONFIG only in environment jobs)
+        run: uv run --project platform python scripts/lint_workflows.py
+      - name: Lint and render both charts
+        run: |
+          D=sha256:0000000000000000000000000000000000000000000000000000000000000000
+          helm lint deploy/helm/service -f deploy/helm/service/values-orders-service.yaml \
+            --set image.repository=x/orders-service --set image.digest=$D
+          helm lint deploy/helm/platform --set image.repository=x/platform --set image.digest=$D \
+            --set dashboardImage.repository=x/dashboard --set dashboardImage.digest=$D
+          for s in auth-service orders-service inventory-service notifications-service; do
+            helm template "$s" deploy/helm/service -f "deploy/helm/service/values-$s.yaml" --set service="$s" \
+              --set image.repository="x/$s" --set image.digest=$D --set-json 'canary.weights=[10,50,100]'
+            echo ---
+          done > rendered.yaml
+          helm template p deploy/helm/platform --set image.repository=x/platform --set image.digest=$D \
+            --set dashboardImage.repository=x/dashboard --set dashboardImage.digest=$D >> rendered.yaml
+          for f in deploy/k3s/data.yaml deploy/k3s/rbac-deployer.yaml deploy/k3s/bg-apps-networkpolicy.yaml \
+                   deploy/k3s/cloudflared.yaml deploy/k3s/rules/*.yaml; do echo ---; cat "$f"; done >> rendered.yaml
+      - name: kubeconform (Kubernetes 1.36, CRD catalog pinned to a commit)
+        run: |
+          docker run --rm -v "$PWD:/w" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
+            -kubernetes-version 1.36.0 -skip HelmChartConfig \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /w/rendered.yaml
 
   dashboard:
     runs-on: ubuntu-24.04
@@ -76,8 +117,8 @@ jobs:
       run:
         working-directory: dashboard
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "24"
           cache: npm
@@ -95,7 +136,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
       - name: promtool (same version as the server, from .env.versions)
         run: |
           TAG=$(sed -n 's/^PROMETHEUS_TAG=\([^ #]*\).*/\1/p' deploy/compose/.env.versions)
@@ -109,7 +150,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           fetch-depth: 0                 # scan the whole history, not only the tip
       - name: gitleaks (same version and config as the pre-commit hook)

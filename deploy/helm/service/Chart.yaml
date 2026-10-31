@@ -1,0 +1,6 @@
+apiVersion: v2
+name: bg-service
+description: One BudgetGuard service under test, shipped as an Argo Rollouts canary
+type: application
+version: 0.3.0
+appVersion: "rev2"

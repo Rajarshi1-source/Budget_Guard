@@ -7,4 +7,5 @@
 !platform/migrations/
 !platform/sql/
 !slo/
+!policy/
 **/__pycache__

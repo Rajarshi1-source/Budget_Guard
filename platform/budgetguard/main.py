@@ -28,6 +28,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.store.ensure_policy_version(settings.policy_version)   # FK target for decisions
     from .integrations.callbacks import rerun_failed_jobs
     app.state.rerun = lambda d: rerun_failed_jobs(app.state.http, d)
+    from .integrations.github_app import GitHubApi
+    from .workers.gate_worker import Context, load_policy
+    policy = load_policy(settings)
+    app.state.attribution = policy.attribution
+    app.state.gate = Context(                            # inline evaluation when Valkey is down (§7)
+        settings=settings, policy=policy, specs={sl.metadata.service: sl for sl in app.state.specs},
+        prom=app.state.prom, engine=app.state.store.engine, valkey=None, http=app.state.http,
+        github=lambda i: GitHubApi(app.state.http, i))
     try:
         yield
     finally:

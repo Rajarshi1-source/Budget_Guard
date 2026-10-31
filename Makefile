@@ -3,6 +3,7 @@
 # rules/test-rules need uv in WSL (curl -LsSf https://astral.sh/uv/install.sh | sh); sloth-parity is W8.
 
 VERSIONS := deploy/compose/.env.versions
+export POLICY_VERSION := $(shell git log -1 --format=%H -- policy/)   # baked into the platform image
 # Later env files win: generated local secrets override the placeholders an .env copied from
 # .env.example still holds; .env supplies what local.env lacks (the GitHub App, OAuth app).
 LOCALENV := deploy/compose/secrets/local.env

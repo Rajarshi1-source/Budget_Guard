@@ -1,0 +1,2 @@
+# inventory-service: merged over values.yaml by deploy.yml (-f deploy/helm/service/values-inventory-service.yaml)
+internalHost: inventory.bg-apps.internal
