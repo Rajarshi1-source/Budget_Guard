@@ -211,7 +211,24 @@ prints the bound beside the rate.
 
 ---
 
-## 7. Interview soundbites
+## 7. As built in W7 (31 Oct 2026)
+
+The reference code went in with these changes; read them before editing the files:
+
+| Point | Rule |
+| --- | --- |
+| One set of types | `backtest/replay.py` imports `DeployFacts`, `to_gate_input`, `Policy` from `budgetguard.records` / `budgetguard.policy`; the backtest cannot drift from the gate |
+| Grounding location | `budgetguard/grounding.py` (the writer runs it online); `evals/grounding.py` re-exports it |
+| Paths | `load_prompt(prompt_dir)`; `BG_PROMPT_DIR` and `BG_LLM_CONFIG` settings; the image copies `platform/prompts` and `platform/config` |
+| Adapters | `budgetguard/integrations/llm.py`; SDKs only with `--extra llm` (Dockerfile `EXTRAS`); a missing SDK or key logs the reason and serves the template |
+| ETA | the gate worker stores `inputs.eta`; `brief_view` reads it, never recomputes |
+| Still allowed | never override wording (FORBIDDEN would fail the template) |
+| Delivery | `inputs.brief` + `brief_source` on the decision; Slack via `BG_SLACK_BRIEFS_URL`; PR comment with a `pull_requests: write` token; "budget recovered" note once per blocked decision |
+| Encoding | every file read and write is UTF-8 (the report's arrow crashed `compare` on Windows) |
+| Workflows | SHA-pinned; steps needing `BG_READONLY_DSN`, `BG_POLICY_DSN`, `BG_EVAL_DSN` or a provider key skip with a notice; main without a backtester is scored with the PR's code |
+| Verified | template 120/120 (Wilson 0.969); reserve 3% fails compare (recall -6.3pp, harm recall -4.5pp) |
+
+## 8. Interview soundbites
 
 - "The model writes the explanation, never the verdict. If the provider is down, the freeze
   still works and the brief comes from a template that scores 100% on the same eval."

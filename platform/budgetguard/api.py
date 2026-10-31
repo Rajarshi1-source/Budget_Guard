@@ -200,13 +200,17 @@ async def decision_replay(decision_id: int, s: Store = Depends(store)) -> dict:
 
 
 def _brief(d: DecisionRow) -> dict | None:
-    """The template comment GitHub showed (W5); the LLM brief replaces it from W7."""
+    """The Freeze Brief once the brief writer has run (W7); until then the comment GitHub showed."""
+    b = d.inputs.get("brief")
+    if b and b.get("text"):
+        return {"text": b["text"], "source": b.get("source", "template"),
+                "fallback_reason": b.get("fallback_reason")}
     text = d.inputs.get("comment")
     return {"text": text, "source": "template", "fallback_reason": None} if text else None
 
 
 def _decision_json(d: DecisionRow) -> dict:
-    inputs = {k: v for k, v in d.inputs.items() if k != "comment"}
+    inputs = {k: v for k, v in d.inputs.items() if k not in ("comment", "brief")}
     return {"id": d.id, "service": d.service, "sha": d.sha, "verdict": d.verdict,
             "reason_code": d.reason_code, "price_pct": d.price_pct, "affordable_pct": d.affordable_pct,
             "canary_profile": list(d.canary_profile), "policy_version": d.policy_version,

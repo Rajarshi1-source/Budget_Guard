@@ -150,6 +150,10 @@ services:
     <<: *platform
     command: ["python", "-m", "budgetguard.workers.deploy_events"]
 
+  brief-writer:                                    # W7: Freeze Briefs off the critical path (template without a key)
+    <<: *platform
+    command: ["python", "-m", "budgetguard.workers.brief_writer"]
+
   reconcilers:                                     # needs a real GitHub App: docker compose --profile github
     <<: *platform
     profiles: ["github"]

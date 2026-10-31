@@ -1,0 +1,99 @@
+name: brief-eval
+
+# Freeze Brief grounding eval (Rev 2 §E, budgetguard-mlops-evals §4). The template must score
+# 100% on every run; the model under test is measured raw (no fallback) against the thresholds and
+# recorded in eval_runs. Nightly runs evaluate the challenger and never fail main.
+on:
+  pull_request:
+    paths:
+      - platform/prompts/**
+      - platform/config/llm.yaml
+      - platform/budgetguard/briefs.py
+      - platform/budgetguard/grounding.py
+      - platform/budgetguard/integrations/llm.py
+      - platform/evals/**
+      - .github/workflows/brief-eval.yml
+  schedule:
+    - cron: "17 21 * * *"        # 02:47 IST nightly: challenger model
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Model to evaluate (defaults to the llm.yaml model)
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  template:                      # deterministic path: must be perfect, needs no secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults: { run: { working-directory: platform } }
+    env:
+      BG_EVAL_DSN: ${{ secrets.BG_EVAL_DSN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      - run: uv sync --frozen
+      - run: uv run pytest -q tests/test_briefs.py tests/test_brief_writer.py
+      - run: uv run python -m evals.run_brief_eval --provider template --out reports/template.json
+      - name: Record in eval_runs
+        if: env.BG_EVAL_DSN != '' && github.event_name != 'pull_request'
+        env: { CODE_SHA: "${{ github.sha }}" }
+        run: uv run python -m evals.record_run --report reports/template.json --trigger manual --code-sha "$CODE_SHA"
+
+  model:
+    needs: template
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults: { run: { working-directory: platform } }
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      BG_EVAL_DSN: ${{ secrets.BG_EVAL_DSN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      - run: uv sync --frozen --extra llm
+      - name: Pick the model under test
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_MODEL: ${{ inputs.model }}
+        run: |
+          read -r PROVIDER DEFAULT CHALLENGER < <(uv run python -c "import yaml;c=yaml.safe_load(open('config/llm.yaml'))['llm'];print(c['provider'],c['model'],c.get('challenger') or c['model'])")
+          if [ "$EVENT" = "schedule" ]; then MODEL="$CHALLENGER"; TRIGGER="nightly"
+          elif [ -n "$INPUT_MODEL" ]; then MODEL="$INPUT_MODEL"; TRIGGER="manual"
+          else MODEL="$DEFAULT"; TRIGGER="pr"; fi
+          case "$MODEL" in *[!A-Za-z0-9._:-]*) echo "::error::bad model name"; exit 1 ;; esac
+          KEY=0
+          case "$PROVIDER" in
+            openai) [ -n "$OPENAI_API_KEY" ] && KEY=1 ;;
+            anthropic) [ -n "$ANTHROPIC_API_KEY" ] && KEY=1 ;;
+            *) KEY=1 ;;
+          esac
+          [ "$KEY" = 1 ] || echo "::notice::No API key for $PROVIDER: the model run is skipped (template still gated)"
+          { echo "provider=$PROVIDER"; echo "model=$MODEL"; echo "trigger=$TRIGGER"; echo "has_key=$KEY"; } >> "$GITHUB_OUTPUT"
+      - name: Run the eval
+        id: run
+        if: steps.pick.outputs.has_key == '1'
+        env:
+          PROVIDER: ${{ steps.pick.outputs.provider }}
+          MODEL: ${{ steps.pick.outputs.model }}
+        run: |
+          set +e
+          uv run python -m evals.run_brief_eval --provider "$PROVIDER" --model "$MODEL" --out reports/brief.json
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+      - name: Record in eval_runs
+        if: always() && steps.pick.outputs.has_key == '1' && env.BG_EVAL_DSN != ''
+        env:
+          TRIGGER: ${{ steps.pick.outputs.trigger }}
+          CODE_SHA: ${{ github.sha }}
+        run: uv run python -m evals.record_run --report reports/brief.json --trigger "$TRIGGER" --code-sha "$CODE_SHA"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9   # v7.0.2
+        if: always() && steps.pick.outputs.has_key == '1'
+        with: { name: brief-eval, path: platform/reports/brief.json }
+      - name: Gate (PRs and manual runs only; the nightly challenger never fails main)
+        if: steps.pick.outputs.has_key == '1' && steps.run.outputs.rc != '0' && steps.pick.outputs.trigger != 'nightly'
+        run: exit 1

@@ -46,10 +46,15 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Query"]
 
 [tool.mypy]
 python_version = "3.14"
-packages = ["budgetguard"]
+packages = ["budgetguard", "backtest", "evals"]
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
 disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# provider SDKs are the optional `llm` extra; the adapters type them as Any
+module = ["openai", "openai.*", "anthropic", "anthropic.*"]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["hatchling>=1.27"]
