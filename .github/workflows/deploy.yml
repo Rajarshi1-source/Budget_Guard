@@ -16,7 +16,13 @@ permissions:
 
 jobs:
   changes:
-    if: github.event.workflow_run.conclusion == 'success'
+    # Only after a published build: a job naming an environment that does not exist makes GitHub
+    # create it on the spot, WITHOUT the BudgetGuard protection rule. So nothing runs until
+    # github-setup.sh has created the environments and set these variables.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      vars.DOCKERHUB_NS != '' && vars.BUDGETGUARD_URL != ''
     runs-on: ubuntu-24.04
     outputs:
       services: ${{ steps.filter.outputs.changes }}
