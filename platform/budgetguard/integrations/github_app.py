@@ -195,19 +195,20 @@ async def post_review(client: httpx.AsyncClient, job: dict, approved: bool, comm
 
 
 class GitHubApi:
-    """Read-only REST calls for one job (lane proofs). One installation token per instance, minted
-    lazily and down-scoped to contents: read on this repository."""
+    """Read-only REST calls for one job: git trees (rollback proof) and the merged PR with its files
+    (change features, incident-fix lane). One installation token per instance, minted lazily and
+    down-scoped to contents: read and pull_requests: read on this repository."""
 
     def __init__(self, client: httpx.AsyncClient, installation_id: int) -> None:
         self.client, self.installation_id = client, installation_id
         self._token: str | None = None
 
-    async def get(self, path: str) -> dict[str, Any]:
+    async def get(self, path: str) -> Any:
         if self._token is None:
-            self._token = await installation_token(self.client, self.installation_id, {"contents": "read"})
+            self._token = await installation_token(self.client, self.installation_id,
+                                                   {"contents": "read", "pull_requests": "read"})
         r = await self.client.get(f"{API}{path}", timeout=5.0,
                                   headers={"Authorization": f"Bearer {self._token}",
                                            "Accept": "application/vnd.github+json"})
         r.raise_for_status()
-        body: dict[str, Any] = r.json()
-        return body
+        return r.json()

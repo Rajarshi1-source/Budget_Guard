@@ -482,6 +482,12 @@ Tokens are cached per scope for 50 minutes in process memory only (never in Valk
 
 ---
 
+
+As built (W5-W6): the gate worker's read token is `{"contents": "read", "pull_requests": "read"}`
+(git trees for the rollback proof; PR, files and commits for change features and the incident-fix lane);
+the callback token is `{"deployments": "write"}`; the re-run token `{"actions": "write"}`; the
+reconcilers' token `{"deployments": "read"}` plus the App JWT for `/app/hook/deliveries`.
+
 ## 7. Secrets inventory and rotation
 
 | Secret | Held by | Stored in | If leaked, the attacker can | Rotate | Cadence |

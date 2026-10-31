@@ -353,6 +353,13 @@ burn × 1 h ÷ 720 h = fraction of the 30-day budget; × 100 = percent. Example:
 `budget_spent(b, t_hours)` function from budgetguard-slo-math; keep the SQL and Python in
 agreement with a test that runs both on the same fixture.
 
+**As built (W6, `workers/deploy_events.py`):** the query above blames a deploy for any page in its
+window, including a dependency's outage (B-15), and `incidents.culprit_service_id` is never set. The
+repo's version requires the page **and** `sum(self_bad) / sum(bad) >= self_page_share` over the window,
+uses a half-open window `[finished_at, finished_at + 60 min)`, and stores the self-inflicted cost for
+every settled deploy (the pricing median reads failures only). A test checks the stored cost against
+`100 * budget_spent(burn, 1)`.
+
 ### 4.10a Override-lane proof (on the re-run's evaluation)
 
 ```sql

@@ -2,7 +2,8 @@
 
 Panels: burn rate per window (Prometheus), 30-day availability from sli_hourly (request-weighted:
 sum(bad)/sum(total), never an average of ratios), MTTR p50/p90 per incident type (query 4.3),
-deploy frequency and change-failure rate (query 4.4), and minutes of degraded SLI integrity.
+deploy frequency and change-failure rate (query 4.4), minutes of degraded SLI integrity,
+chargeback (query 4.6, D-3) and freeze impact (freeze_impact view, W6.6).
 """
 from __future__ import annotations
 
@@ -101,6 +102,35 @@ ORDER BY 1
     fieldConfig={"defaults": {"unit": "m", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 60}},
                  "overrides": []})
 
+chargeback = panel(
+    6, "Chargeback: who caused the bad events (30 days)", "table", (0, 26, 12, 8),
+    [sql("A", """
+SELECT s.name AS service,
+       round((100.0 * sum(b.self_bad) / NULLIF(sum(b.bad), 0))::numeric, 1) AS self_share_pct,
+       round((sum(b.bad) - sum(b.self_bad))::numeric, 0) AS dependency_bad_events,
+       round(sum(b.bad)::numeric, 0) AS bad_events
+FROM sli_buckets b JOIN slos o ON o.id = b.slo_id JOIN services s ON s.id = o.service_id
+WHERE o.name = 'availability' AND b.bucket_start >= now() - INTERVAL '30 days' AND s.name IN ($service)
+GROUP BY s.name ORDER BY 1
+""")],
+    "Query 4.6 (D-3). Self share is what the gate charges under attribution charge_origin; the "
+    "rest was caused by a dependency, so it freezes the dependency, not this service.",
+    fieldConfig={"defaults": {"decimals": 1}, "overrides": []})
+
+freeze = panel(
+    7, "Freeze impact: blocked deploys and freeze minutes", "timeseries", (12, 26, 12, 8),
+    [sql("A", """
+SELECT day AS time, service || ' freeze min' AS metric, freeze_minutes AS value
+FROM freeze_impact WHERE $__timeFilter(day) AND service IN ($service)
+UNION ALL
+SELECT day, service || ' blocked', blocked_deploys
+FROM freeze_impact WHERE $__timeFilter(day) AND service IN ($service)
+ORDER BY 1
+""", fmt="time_series")],
+    "From the freeze_impact view over decisions. A block freezes the service until its next decision; "
+    "the backtester (W7) compares these minutes across policies as false-freeze minutes.",
+    fieldConfig={"defaults": {"min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 50}}, "overrides": []})
+
 dashboard = {
     "uid": "bg-service-reliability",
     "title": "BudgetGuard / Service reliability",
@@ -116,7 +146,7 @@ dashboard = {
         "query": {"query": "label_values(bg:slo_allowed_ratio, service)", "refId": "service"},
         "definition": "label_values(bg:slo_allowed_ratio, service)",
         "includeAll": True, "multi": True, "current": {"text": "All", "value": "$__all"}, "refresh": 2}]},
-    "panels": [burn, availability, mttr, dora, integrity],
+    "panels": [burn, availability, mttr, dora, integrity, chargeback, freeze],
 }
 
 out = Path(__file__).resolve().parent / "dashboards" / "service-reliability.json"

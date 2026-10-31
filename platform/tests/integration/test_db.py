@@ -68,7 +68,7 @@ async def test_migrations_create_the_schema(owner: AsyncEngine) -> None:
     assert {(v, m) for v, m in caggs} == {("sli_hourly", False), ("sli_daily", False)}   # real-time on
     assert {t for t, _ in auth} >= {"user", "session", "account", "verification"}
     assert {o for _, o in auth} == {"bg_auth"}
-    assert head == "007"
+    assert head == "008"
 
 
 async def test_sync_slos_is_idempotent(owner: AsyncEngine) -> None:

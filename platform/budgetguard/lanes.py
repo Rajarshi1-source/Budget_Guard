@@ -6,16 +6,19 @@ self-asserted by the person who benefits from it, so it is not a security bounda
             re-run of an old commit produce a matching tree; a "rollback" that adds code cannot.
   override  an unexpired, unconsumed overrides row for this service and SHA (query 4.10a), locked
             FOR UPDATE SKIP LOCKED and consumed in the same transaction as the new decision.
-  incident_fix  arrives in W6.4.
+  incident_fix  an open incident on this service whose alert is firing, referenced by a PR of at most
+            400 lines; or a Dependabot/Renovate PR citing a security advisory (W6.4).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from .changes import PullRequest
 from .gate import Lane
 
 
@@ -89,3 +92,52 @@ async def override_proof(conn: AsyncConnection, service: str, sha: str) -> LaneP
 async def consume_override(conn: AsyncConnection, override_id: int, decision_id: int) -> None:
     await conn.execute(text("UPDATE overrides SET consumed_by_decision_id = :d WHERE id = :o"),
                        {"d": decision_id, "o": override_id})
+
+
+# ---------------------------------------------------------------- incident-fix and security lanes (W6.4)
+INCIDENT_REF = re.compile(r"\bfixes\s+BG-INC-(\d{1,12})\b", re.IGNORECASE)
+ADVISORY = re.compile(r"\bGHSA(?:-[23456789cfghjmpqrvwx]{4}){3}\b", re.IGNORECASE)
+ALERTNAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")      # before it is placed in PromQL
+SECURITY_BOTS = frozenset({"dependabot[bot]", "renovate[bot]"})
+INCIDENT_FIX_MAX_LINES = 400
+
+OPEN_INCIDENT = text("""
+SELECT i.id, i.alertname
+FROM incidents i JOIN services s ON s.id = i.service_id
+WHERE i.id = :id AND s.name = :service AND i.resolved_at IS NULL
+""")
+
+
+class AlertReader(Protocol):
+    async def query(self, expr: str) -> list[dict[str, Any]]: ...
+
+
+async def incident_fix_proof(conn: AsyncConnection, prom: AlertReader, service: str,
+                             pr: PullRequest | None) -> LaneProof:
+    """Incident fix: the PR says `Fixes BG-INC-<id>`, that incident is open on THIS service, its
+    alertname is firing for this service in Prometheus right now (an incident row alone can be forged
+    through the Alertmanager webhook, security-and-api.md T-6), and the PR is at most 400 lines.
+    Security: a Dependabot/Renovate PR that cites a GitHub security advisory; treated as a fix."""
+    if pr is None:
+        return LaneProof(None)
+    if pr.author in SECURITY_BOTS and (adv := ADVISORY.search(pr.body)):
+        return LaneProof(Lane.INCIDENT_FIX, {"kind": "security", "author": pr.author,
+                                             "advisory": adv.group(0), "pr": pr.number})
+    ref = INCIDENT_REF.search(pr.body)
+    if ref is None:
+        return LaneProof(None)
+    evidence: dict[str, Any] = {"kind": "incident_fix", "incident_id": int(ref.group(1)), "pr": pr.number,
+                                "pr_lines": pr.total_lines}
+    if pr.total_lines > INCIDENT_FIX_MAX_LINES:
+        why = f"PR has {pr.total_lines} lines (max {INCIDENT_FIX_MAX_LINES})"
+        return LaneProof(None, {**evidence, "denied": why})
+    row = (await conn.execute(OPEN_INCIDENT, {"id": int(ref.group(1)), "service": service})).first()
+    if row is None:
+        return LaneProof(None, {**evidence, "denied": "no open incident with that id on this service"})
+    if not ALERTNAME.match(row.alertname):
+        return LaneProof(None, {**evidence, "denied": "incident alertname is not a valid metric name"})
+    sel = f'alertstate="firing",alertname="{row.alertname}",service="{service}"'
+    firing = await prom.query(f"ALERTS{{{sel}}}")
+    if not firing:
+        return LaneProof(None, {**evidence, "alertname": row.alertname, "denied": "alert is not firing"})
+    return LaneProof(Lane.INCIDENT_FIX, {**evidence, "alertname": row.alertname})

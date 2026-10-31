@@ -26,7 +26,7 @@ def _when(t: datetime | None) -> str:
 
 
 def template_comment(service: str, d: Decision, decision_url: str, eta: Eta | None,
-                     remaining_pct: float | None) -> str:
+                     remaining_pct: float | None, note: str = "") -> str:
     verdict = {Verdict.ADMIT: "Admitted", Verdict.ADMIT_UNVERIFIED: "Admitted UNVERIFIED",
                Verdict.BLOCK: "Blocked"}[d.verdict]
     lines = [f"BudgetGuard: {verdict} ({d.reason_code}) for {service}.", d.reason + "."]
@@ -35,6 +35,8 @@ def template_comment(service: str, d: Decision, decision_url: str, eta: Eta | No
                      f"affordable now {d.affordable_pct:.2f}%.")
     if remaining_pct is not None:
         lines.append(f"Budget remaining: {remaining_pct:.1f}%.")
+    if note:
+        lines.append(f"Change: {note}.")
     if d.verdict is not Verdict.BLOCK:
         lines.append(f"Canary: {' -> '.join(f'{w}%' for w in d.canary_profile)}.")
     if eta is not None:

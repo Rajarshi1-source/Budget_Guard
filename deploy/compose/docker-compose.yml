@@ -146,6 +146,10 @@ services:
     command: ["python", "-m", "budgetguard.workers.gate_worker"]
     deploy: { replicas: 2 }                        # XAUTOCLAIM adopts a killed worker's jobs after 60 s
 
+  deploy-recorder:                                 # W6: bg:deploy-events -> deployments, change-failure timer
+    <<: *platform
+    command: ["python", "-m", "budgetguard.workers.deploy_events"]
+
   reconcilers:                                     # needs a real GitHub App: docker compose --profile github
     <<: *platform
     profiles: ["github"]

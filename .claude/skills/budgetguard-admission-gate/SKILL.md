@@ -474,6 +474,17 @@ trip, `replay`), `lanes.py`, `gather.py`, `briefs.py` (template), `workers/gate_
 | asyncpg arrays | pass `canary_profile` as a Python list; a `'{25,100}'` string is rejected |
 | Admin bypass | synthetic `ADMIN_BYPASS` decision keyed `bypass:<deployment id>` + overrides row (`decision_id` is NOT NULL) |
 
+### As built in W6 (31 Oct 2026)
+
+| Point | Rule |
+| --- | --- |
+| Features | `changes.py`: merged PR for the SHA, paginated files, filtered to `services/<service>/`; no PR or a malformed answer -> `size_max`, with the note in the comment and `inputs.change` |
+| Token | one per job, `contents: read` + `pull_requests: read` |
+| Lane order | rollback > override > incident fix; the security lane is recorded as `INCIDENT_FIX` with `kind: security` |
+| Incident fix | `Fixes BG-INC-<id>` + open incident on THIS service + its alertname firing in `ALERTS` for this service + PR <= 400 lines; the alertname is validated as a metric name before it enters PromQL |
+| History | query 4.7 with the leak rule (`finished_at + 60 min <= decided_at`); the §D table reproduces from 30 fixture rows (integration test) |
+| Change failure | `workers/deploy_events.py`: page incident in the window AND `self_bad / bad >= self_page_share`; the window's self-inflicted cost equals `100 * budget_spent(burn, 1 h)` |
+
 ## 8. Tests to keep
 
 - Every row of the §3 worked example as a parametrized test.
