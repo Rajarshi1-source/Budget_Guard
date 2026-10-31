@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from .workers.gate_worker import Context, load_policy
     policy = load_policy(settings)
     app.state.attribution = policy.attribution
+    app.state.self_page_share = policy.self_page_share
     app.state.gate = Context(                            # inline evaluation when Valkey is down (§7)
         settings=settings, policy=policy, specs={sl.metadata.service: sl for sl in app.state.specs},
         prom=app.state.prom, engine=app.state.store.engine, valkey=None, http=app.state.http,

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .auth import github_user, require_alertmanager, require_dashboard, verify_actions_oidc
 from .config import get_settings
+from .gather import self_share
 from .incidents import events_from_payload
 from .integrations.prometheus import PrometheusClient, PrometheusUnavailable
 from .queue import invalidate_verdicts
@@ -129,6 +130,7 @@ async def services_summary(request: Request, s: Store = Depends(store)) -> list[
     specs: list[ServiceLevel] = request.app.state.specs
     prom: PrometheusClient = request.app.state.prom
     attribution = getattr(request.app.state, "attribution", "charge_origin")
+    self_page_share = getattr(request.app.state, "self_page_share", 0.5)
     now = datetime.now(UTC)
     windows, daily, incidents, decisions = await asyncio.gather(
         s.slo_windows(now), s.slo_daily(now, 59), s.open_incidents(), s.last_decisions())
@@ -143,11 +145,20 @@ async def services_summary(request: Request, s: Store = Depends(store)) -> list[
             rem = gate_remaining(slo, w, attribution)
             frozen_by_budget = rem is not None and rem < sl.spec.gate.reserve_pct
             self_only = attribution == "charge_origin" and bool(slo.sli.self_bad)
+            status = by_key[(svc, slo.name)]
+            share = None
+            if status.page_firing and attribution == "charge_origin":
+                try:
+                    share = await self_share(prom, svc, slo)
+                except PrometheusUnavailable:
+                    share = 1.0                  # cannot tell: the gate treats the page as self-inflicted
             inputs[slo.name] = SloInputs(
-                status=by_key[(svc, slo.name)], window=w, daily=daily.get((svc, slo.name), []),
-                eta_buckets=await s.eta_buckets(svc, slo.name, now, self_only) if frozen_by_budget else ())
+                status=status, window=w, daily=daily.get((svc, slo.name), []),
+                eta_buckets=await s.eta_buckets(svc, slo.name, now, self_only) if frozen_by_budget else (),
+                self_share_1h=share)
         cards.append(service_card(sl, inputs, now=now, open_incident=incidents.get(svc),
-                                  last_decision=decisions.get(svc), attribution=attribution))
+                                  last_decision=decisions.get(svc), attribution=attribution,
+                                  self_page_share=self_page_share))
     return cards
 
 

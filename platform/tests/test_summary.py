@@ -49,13 +49,13 @@ def test_budget_freeze_projects_an_eta() -> None:
 
 def test_page_freeze_has_no_eta() -> None:
     c = card(SloInputs(status("availability", page=True), Window(864_000, 864, 864),
-                       eta_buckets=eta_window(3)))
+                       eta_buckets=eta_window(3), self_share_1h=1.0))
     assert c["frozen"] and c["unfreeze_eta"] is None
 
 
 def test_burning_latency_turns_the_card_at_risk() -> None:
     c = card(SloInputs(status("availability"), Window(1e6, 0, 0)),
-             SloInputs(status("latency", page=True), Window(1e6, 0, 0)))
+             SloInputs(status("latency", page=True), Window(1e6, 0, 0), self_share_1h=1.0))   # no origin
     assert (c["state"], c["frozen"]) == ("at_risk", True)
     assert c["remaining_pct"] == pytest.approx(100.0)          # numbers stay the availability SLO's
 
@@ -85,3 +85,13 @@ def test_rolling_daily_sums_counts_over_30_days() -> None:
 
 def test_rolling_daily_without_history_is_none() -> None:
     assert rolling_daily(0.999, [], date(2026, 10, 26)) == [None] * 30
+
+
+def test_a_dependency_caused_page_does_not_freeze_the_card_under_charge_origin() -> None:
+    victim = SloInputs(status("availability", page=True), Window(1e6, 900, 9), self_share_1h=0.01)
+    c = card(victim)
+    assert c["frozen"] is False and c["state"] == "at_risk"          # users felt it: at risk, not frozen
+    own = SloInputs(status("availability", page=True), Window(1e6, 900, 9), self_share_1h=0.9)
+    assert card(own)["frozen"] is True
+    unknown = SloInputs(status("availability", page=True), Window(1e6, 900, 9))
+    assert card(unknown)["frozen"] is False                           # no share: nothing self-inflicted
